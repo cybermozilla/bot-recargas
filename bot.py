@@ -10,10 +10,11 @@ URL_TIENDA = "https://tiendagiftven.tech/api/v1"
 app = Flask(__name__)
 
 def enviar_mensaje(chat_id, texto):
-    requests.post(f"{URL_TELEGRAM}/sendMessage", json={
+    resp = requests.post(f"{URL_TELEGRAM}/sendMessage", json={
         "chat_id": chat_id,
         "text": texto
     })
+    print(f"Telegram response: {resp.status_code} {resp.text}")
 
 def consultar_saldo(chat_id):
     resp = requests.get(f"{URL_TIENDA}/saldo", headers={"X-API-Key": API_KEY_TIENDA})
