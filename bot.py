@@ -69,19 +69,16 @@ def webhook():
     sesion = sesiones.get(chat_id, {})
 
     # LOGIN
-    if texto == "/start" or not sesion.get("usuario"):
-        enviar_mensaje(chat_id, "👤 ¿Quién eres?", teclado_opciones(["MD", "Albo", "Ocho"]))
+    if texto == "/start":
         sesiones[chat_id] = {"paso": "login"}
+        enviar_mensaje(chat_id, "👤 ¿Quién eres?", teclado_opciones(["MD", "Albo", "Ocho"]))
         return jsonify({"status": "ok"})
 
-    if sesion.get("paso") == "login":
-        if texto in ["MD", "Albo", "Ocho"]:
-            sesiones[chat_id] = {"usuario": texto, "paso": "menu"}
-            enviar_mensaje(chat_id, f"✅ Bienvenido {texto}!\n\nElige un comando:\n/recargar - Nueva recarga\n/reporte - Ver recargas de hoy\n/saldo - Ver saldo")
-        else:
-            enviar_mensaje(chat_id, "❌ Usuario no válido.", teclado_opciones(["MD", "Albo", "Ocho"]))
+    if not sesion.get("usuario"):
+        sesiones[chat_id] = {"paso": "login"}
+        enviar_mensaje(chat_id, "👤 ¿Quién eres?", teclado_opciones(["MD", "Albo", "Ocho"]))
         return jsonify({"status": "ok"})
-
+        
     usuario = sesion.get("usuario")
 
     # COMANDOS PRINCIPALES
