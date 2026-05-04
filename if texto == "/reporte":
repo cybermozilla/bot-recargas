@@ -100,7 +100,7 @@ def botones(opciones):
 
 def menu_principal(chat_id, usuario, saldo):
     if usuario == "Admin":
-        enviar(chat_id, f"👑 Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reporte completo\n/asignar - Asignar saldo a local")
+        enviar(chat_id, f"👑 Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reporte de recargas\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local")
     else:
         enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy")
 
@@ -158,27 +158,65 @@ def webhook():
             enviar(chat_id, f"Tu saldo: ${u['saldo']}")
         return {"status": "ok"}
 
-    if texto == "/reporte":
-        recargas = sb_get_recargas_hoy(None if es_admin else usuario)
+if texto == "/reporte":
+        if es_admin:
+            # Obtener todos los usuarios de la base de datos
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre&es_admin=eq.false",
+                headers=HEADERS_SB
+            )
+            usuarios_db = [u["nombre"] for u in r.json()]
+            opciones = ["Todos"] + usuarios_db
+            sesiones[chat_id]["paso"] = "reporte_elegir"
+            enviar(chat_id, "¿De qué usuario quieres ver el reporte?", botones(opciones))
+        else:
+            recargas = sb_get_recargas_hoy(usuario)
+            if not recargas:
+                enviar(chat_id, "No hay recargas hoy.")
+                return {"status": "ok"}
+            msg = "Recargas de hoy:\n\n"
+            total = 0
+            for r in recargas:
+                msg += f"{r['producto']} | ${r['monto']} | ID: {r['id_jugador']} | Pedido #{r['pedido_id']}\n"
+                total += float(r['monto'])
+            msg += f"\nTotal: ${total:.2f}"
+            enviar(chat_id, msg)
+        return {"status": "ok"}
+
+    if paso == "reporte_elegir":
+        filtro = None if texto == "Todos" else texto
+        recargas = sb_get_recargas_hoy(filtro)
+        titulo = f"Recargas de hoy - {texto}:" if texto != "Todos" else "Recargas de hoy - Todos:"
         if not recargas:
-            enviar(chat_id, "No hay recargas hoy.")
+            enviar(chat_id, f"No hay recargas hoy para {texto}.")
+            sesiones[chat_id]["paso"] = "menu"
             return {"status": "ok"}
-        msg = "Recargas de hoy:\n\n"
+        msg = f"{titulo}\n\n"
         total = 0
         for r in recargas:
             msg += f"{r['usuario']} | {r['producto']} | ${r['monto']} | ID: {r['id_jugador']} | Pedido #{r['pedido_id']}\n"
             total += float(r['monto'])
         msg += f"\nTotal: ${total:.2f}"
         enviar(chat_id, msg)
+        sesiones[chat_id]["paso"] = "menu"
         return {"status": "ok"}
+        
 
-    if texto == "/asignar":
+    if texto == "/usuarios":
         if not es_admin:
-            enviar(chat_id, "Solo el admin puede asignar saldo.")
+            enviar(chat_id, "Solo el admin puede ver esto.")
             return {"status": "ok"}
-        sesiones[chat_id]["paso"] = "asignar_local"
-        enviar(chat_id, "A que local asignar saldo?", botones(["MD", "Albo", "Ocho"]))
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre,saldo&es_admin=eq.false",
+            headers=HEADERS_SB
+        )
+        usuarios_db = r.json()
+        msg = "Saldos por local:\n\n"
+        for u in usuarios_db:
+            msg += f"👤 {u['nombre']}: ${u['saldo']}\n"
+        enviar(chat_id, msg)
         return {"status": "ok"}
+        
 
     if paso == "asignar_local":
         if texto in ["MD", "Albo", "Ocho"]:
