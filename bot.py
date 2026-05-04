@@ -3,7 +3,7 @@ import requests
 from flask import Flask, request
 from datetime import datetime
 
-TOKEN_BOT = "7864266536:AAHW3BMrhRqDzeUsaydQQ6Pum5KbCpG8GEM"
+TOKEN_BOT = "7864266536:AAHIesZRiBDQFztMNBb3JJn_JOM0K4cBmD0"
 API_KEY_TIENDA = "2fc6bc5920314acce1467adb2e95dbd369e7312f31a7c465f6aef0fb86d7537d"
 URL_TELEGRAM = f"https://api.telegram.org/bot{TOKEN_BOT}"
 URL_TIENDA = "https://tiendagiftven.tech/api/v1"
