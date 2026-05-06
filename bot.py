@@ -3,12 +3,12 @@ import requests
 from flask import Flask, request
 from datetime import datetime
 
-TOKEN_BOT = "7864266536:AAHIesZRiBDQFztMNBb3JJn_JOM0K4cBmD0"
-API_KEY_TIENDA = "2fc6bc5920314acce1467adb2e95dbd369e7312f31a7c465f6aef0fb86d7537d"
+TOKEN_BOT = os.environ.get("TOKEN_BOT")
+API_KEY_TIENDA = os.environ.get("API_KEY_TIENDA")
 URL_TELEGRAM = f"https://api.telegram.org/bot{TOKEN_BOT}"
 URL_TIENDA = "https://tiendagiftven.tech/api/v1"
-SUPABASE_URL = "https://djicdsioescrhoydlvdz.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRqaWNkc2lvZXNjcmhveWRsdmR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzNzEzNTUsImV4cCI6MjA5MTk0NzM1NX0.dPfDVoM7-GyjvsWyCSzczlYYjMwWByhL2Z8PQ7HeTzI"
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 HEADERS_SB = {
     "apikey": SUPABASE_KEY,
