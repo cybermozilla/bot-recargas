@@ -75,12 +75,18 @@ def sb_guardar_recarga(usuario, producto, monto, id_jugador, pedido_id):
 def sb_get_recargas_hoy(usuario=None):
     from datetime import timezone, timedelta
     zona = timezone(timedelta(hours=-5))
-    hoy = datetime.now(zona).strftime("%Y-%m-%d")
-    url = f"{SUPABASE_URL}/rest/v1/recargas?fecha=gte.{hoy}&select=*&order=fecha.desc"
+    ahora = datetime.now(zona)
+    hoy_inicio = ahora.strftime("%Y-%m-%d") + "T00:00:00"
+    hoy_fin = ahora.strftime("%Y-%m-%d") + "T23:59:59"
+    # Convertir a UTC para filtrar en Supabase
+    inicio_utc = (ahora.replace(hour=0, minute=0, second=0, microsecond=0)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    fin_utc = (ahora.replace(hour=23, minute=59, second=59, microsecond=0)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    url = f"{SUPABASE_URL}/rest/v1/recargas?fecha=gte.{inicio_utc}&fecha=lte.{fin_utc}&select=*&order=fecha.desc"
     if usuario:
         url += f"&usuario=eq.{usuario}"
     r = requests.get(url, headers=HEADERS_SB)
     return r.json()
+    
 
 def enviar(chat_id, texto, teclado=None):
     datos = {"chat_id": chat_id, "text": texto}
