@@ -27,7 +27,7 @@ PRODUCTOS = [
     {"id": 4,   "nombre": "1060+106 💎",     "precio": 10},
     {"id": 5,   "nombre": "2180+218 💎",     "precio": 20},
     {"id": 6,   "nombre": "5600+560 💎",     "precio": 50},
-    {"id": 155, "nombre": "Tarjeta Básica",  "precio": 1},
+    {"id": 155, "nombre": "Tarjeta Basica",  "precio": 1},
     {"id": 156, "nombre": "Tarjeta Semanal", "precio": 3},
     {"id": 157, "nombre": "Tarjeta Mensual", "precio": 11},
     {"id": 158, "nombre": "Pase Booyah",     "precio": 4},
@@ -102,7 +102,7 @@ def botones(opciones):
 
 def menu_principal(chat_id, usuario, saldo):
     if usuario == "Admin":
-        enviar(chat_id, f"👑 Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reporte de recargas\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local")
+        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local")
     else:
         enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy")
 
@@ -118,12 +118,12 @@ def webhook():
 
     if texto == "/start":
         sesiones[chat_id] = {"paso": "login_nombre"}
-        enviar(chat_id, "👤 Escribe tu nombre de usuario:")
+        enviar(chat_id, "Escribe tu nombre de usuario:")
         return {"status": "ok"}
 
     if not sesion:
         sesiones[chat_id] = {"paso": "login_nombre"}
-        enviar(chat_id, "👤 Escribe tu nombre de usuario:")
+        enviar(chat_id, "Escribe tu nombre de usuario:")
         return {"status": "ok"}
 
     paso = sesion.get("paso", "")
@@ -160,7 +160,22 @@ def webhook():
             enviar(chat_id, f"Tu saldo: ${u['saldo']}")
         return {"status": "ok"}
 
-if texto == "/reporte":
+    if texto == "/usuarios":
+        if not es_admin:
+            enviar(chat_id, "Solo el admin puede ver esto.")
+            return {"status": "ok"}
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre,saldo&es_admin=eq.false",
+            headers=HEADERS_SB
+        )
+        usuarios_db = r.json()
+        msg = "Saldos por local:\n\n"
+        for u in usuarios_db:
+            msg += f"👤 {u['nombre']}: ${u['saldo']}\n"
+        enviar(chat_id, msg)
+        return {"status": "ok"}
+
+    if texto == "/reporte":
         if es_admin:
             sesiones[chat_id]["paso"] = "reporte_tipo"
             enviar(chat_id, "Que reporte deseas ver?", botones(["Ventas de hoy", "Saldos por local"]))
@@ -218,31 +233,28 @@ if texto == "/reporte":
         enviar(chat_id, msg)
         sesiones[chat_id]["paso"] = "menu"
         return {"status": "ok"}
-        
 
-    if texto == "/usuarios":
+    if texto == "/asignar":
         if not es_admin:
-            enviar(chat_id, "Solo el admin puede ver esto.")
+            enviar(chat_id, "Solo el admin puede asignar saldo.")
             return {"status": "ok"}
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre,saldo&es_admin=eq.false",
+            f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre&es_admin=eq.false",
             headers=HEADERS_SB
         )
-        usuarios_db = r.json()
-        msg = "Saldos por local:\n\n"
-        for u in usuarios_db:
-            msg += f"👤 {u['nombre']}: ${u['saldo']}\n"
-        enviar(chat_id, msg)
+        usuarios_db = [u["nombre"] for u in r.json()]
+        sesiones[chat_id]["paso"] = "asignar_local"
+        enviar(chat_id, "A que local asignar saldo?", botones(usuarios_db))
         return {"status": "ok"}
-        
 
     if paso == "asignar_local":
-        if texto in ["MD", "Albo", "Ocho"]:
+        u = sb_get_usuario(texto)
+        if u and not u["es_admin"]:
             sesiones[chat_id]["asignar_a"] = texto
             sesiones[chat_id]["paso"] = "asignar_monto"
             enviar(chat_id, f"Cuanto saldo asignar a {texto}?")
         else:
-            enviar(chat_id, "Local no valido.", botones(["MD", "Albo", "Ocho"]))
+            enviar(chat_id, "Local no valido.")
         return {"status": "ok"}
 
     if paso == "asignar_monto":
@@ -333,7 +345,7 @@ if texto == "/reporte":
 
 @app.route("/")
 def index():
-    return "Bot activo v5", 200
+    return "Bot activo v6", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
