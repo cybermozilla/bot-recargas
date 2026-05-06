@@ -73,7 +73,9 @@ def sb_guardar_recarga(usuario, producto, monto, id_jugador, pedido_id):
     )
 
 def sb_get_recargas_hoy(usuario=None):
-    hoy = datetime.now().strftime("%Y-%m-%d")
+    from datetime import timezone, timedelta
+    zona = timezone(timedelta(hours=-5))
+    hoy = datetime.now(zona).strftime("%Y-%m-%d")
     url = f"{SUPABASE_URL}/rest/v1/recargas?fecha=gte.{hoy}&select=*&order=fecha.desc"
     if usuario:
         url += f"&usuario=eq.{usuario}"
@@ -160,15 +162,8 @@ def webhook():
 
 if texto == "/reporte":
         if es_admin:
-            # Obtener todos los usuarios de la base de datos
-            r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre&es_admin=eq.false",
-                headers=HEADERS_SB
-            )
-            usuarios_db = [u["nombre"] for u in r.json()]
-            opciones = ["Todos"] + usuarios_db
-            sesiones[chat_id]["paso"] = "reporte_elegir"
-            enviar(chat_id, "¿De qué usuario quieres ver el reporte?", botones(opciones))
+            sesiones[chat_id]["paso"] = "reporte_tipo"
+            enviar(chat_id, "Que reporte deseas ver?", botones(["Ventas de hoy", "Saldos por local"]))
         else:
             recargas = sb_get_recargas_hoy(usuario)
             if not recargas:
@@ -183,10 +178,33 @@ if texto == "/reporte":
             enviar(chat_id, msg)
         return {"status": "ok"}
 
+    if paso == "reporte_tipo":
+        if texto == "Saldos por local":
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre,saldo&es_admin=eq.false",
+                headers=HEADERS_SB
+            )
+            usuarios_db = r.json()
+            msg = "Saldos por local:\n\n"
+            for u in usuarios_db:
+                msg += f"👤 {u['nombre']}: ${u['saldo']}\n"
+            enviar(chat_id, msg)
+            sesiones[chat_id]["paso"] = "menu"
+        elif texto == "Ventas de hoy":
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/usuarios?select=nombre&es_admin=eq.false",
+                headers=HEADERS_SB
+            )
+            usuarios_db = [u["nombre"] for u in r.json()]
+            opciones = ["Todos"] + usuarios_db
+            sesiones[chat_id]["paso"] = "reporte_elegir"
+            enviar(chat_id, "De que usuario?", botones(opciones))
+        return {"status": "ok"}
+
     if paso == "reporte_elegir":
         filtro = None if texto == "Todos" else texto
         recargas = sb_get_recargas_hoy(filtro)
-        titulo = f"Recargas de hoy - {texto}:" if texto != "Todos" else "Recargas de hoy - Todos:"
+        titulo = f"Ventas de hoy - {texto}:"
         if not recargas:
             enviar(chat_id, f"No hay recargas hoy para {texto}.")
             sesiones[chat_id]["paso"] = "menu"
