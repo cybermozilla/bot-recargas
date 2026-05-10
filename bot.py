@@ -58,6 +58,12 @@ def sb_recargar_saldo(nombre, monto):
         headers=HEADERS_SB,
         json={"saldo": nuevo}
     )
+def sb_crear_usuario(nombre, password):
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/usuarios",
+        headers=HEADERS_SB,
+        json={"nombre": nombre, "password": password, "saldo": 0, "es_admin": False}
+    )
 
 def sb_guardar_recarga(usuario, producto, monto, id_jugador, pedido_id):
     requests.post(
@@ -108,7 +114,7 @@ def botones(opciones):
 
 def menu_principal(chat_id, usuario, saldo):
     if usuario == "Admin":
-        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local")
+        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario")
     else:
         enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy")
 
@@ -239,7 +245,61 @@ def webhook():
         enviar(chat_id, msg)
         sesiones[chat_id]["paso"] = "menu"
         return {"status": "ok"}
+    if texto == "/nuevo":
+        if not es_admin:
+            enviar(chat_id, "Solo el admin puede crear usuarios.")
+            return {"status": "ok"}
+        sesiones[chat_id]["paso"] = "nuevo_nombre"
+        enviar(chat_id, "Escribe el nombre del nuevo usuario:")
+        return {"status": "ok"}
 
+    if paso == "nuevo_nombre":
+        nombre_nuevo = texto
+        u = sb_get_usuario(nombre_nuevo)
+        if u:
+            enviar(chat_id, f"Ya existe un usuario con ese nombre. Escribe otro:")
+            return {"status": "ok"}
+        import random, string
+        letras = random.choices(string.ascii_uppercase, k=2)
+        numeros = random.choices(string.digits, k=2)
+        pwd_sugerida = "".join(letras + numeros)
+        sesiones[chat_id]["nuevo_nombre"] = nombre_nuevo
+        sesiones[chat_id]["pwd_sugerida"] = pwd_sugerida
+        sesiones[chat_id]["paso"] = "nuevo_password"
+        enviar(chat_id, 
+            f"Usuario: {nombre_nuevo}\n"
+            f"Contrasena sugerida: {pwd_sugerida}\n\n"
+            f"Escribe una contrasena o envía 'ok' para usar la sugerida:",
+        )
+        return {"status": "ok"}
+
+    if paso == "nuevo_password":
+        pwd_final = sesiones[chat_id]["pwd_sugerida"] if texto.lower() == "ok" else texto
+        nombre_nuevo = sesiones[chat_id]["nuevo_nombre"]
+        sesiones[chat_id]["paso"] = "nuevo_saldo"
+        sesiones[chat_id]["nuevo_password"] = pwd_final
+        enviar(chat_id, f"Cuanto saldo inicial para {nombre_nuevo}? (escribe 0 si ninguno)")
+        return {"status": "ok"}
+
+    if paso == "nuevo_saldo":
+        try:
+            saldo_inicial = float(texto)
+            nombre_nuevo = sesiones[chat_id]["nuevo_nombre"]
+            pwd_final = sesiones[chat_id]["nuevo_password"]
+            sb_crear_usuario(nombre_nuevo, pwd_final)
+            if saldo_inicial > 0:
+                sb_recargar_saldo(nombre_nuevo, saldo_inicial)
+            sesiones[chat_id]["paso"] = "menu"
+            enviar(chat_id,
+                f"Usuario creado!\n\n"
+                f"Nombre: {nombre_nuevo}\n"
+                f"Contrasena: {pwd_final}\n"
+                f"Saldo inicial: ${saldo_inicial}"
+            )
+        except:
+            enviar(chat_id, "Escribe un numero valido.")
+        return {"status": "ok"}
+    
     if texto == "/asignar":
         if not es_admin:
             enviar(chat_id, "Solo el admin puede asignar saldo.")
