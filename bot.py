@@ -274,7 +274,19 @@ def webhook():
         return {"status": "ok"}
 
     if paso == "nuevo_password":
-        pwd_final = sesiones[chat_id]["pwd_sugerida"] if texto.lower() == "ok" else texto
+        texto_limpio = texto.strip().lower().replace("👍", "ok").replace("✅", "ok")
+        if texto_limpio == "ok":
+            pwd_final = sesiones[chat_id]["pwd_sugerida"]
+        elif len(texto) < 4:
+            enviar(chat_id, "La contrasena debe tener al menos 4 caracteres. Intenta de nuevo o escribe 'ok' para usar la sugerida:")
+            return {"status": "ok"}
+        else:
+            import re
+            if not re.match(r'^[a-zA-Z0-9]+$', texto):
+                enviar(chat_id, "Solo letras y numeros permitidos. Intenta de nuevo o escribe 'ok' para usar la sugerida:")
+                return {"status": "ok"}
+            pwd_final = texto
+        
         nombre_nuevo = sesiones[chat_id]["nuevo_nombre"]
         sesiones[chat_id]["paso"] = "nuevo_saldo"
         sesiones[chat_id]["nuevo_password"] = pwd_final
