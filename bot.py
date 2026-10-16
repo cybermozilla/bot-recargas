@@ -1,4 +1,9 @@
 import os
+import json
+import hmac
+import hashlib
+import time
+import uuid
 import requests
 from flask import Flask, request
 from datetime import datetime
@@ -9,6 +14,15 @@ URL_TELEGRAM = f"https://api.telegram.org/bot{TOKEN_BOT}"
 URL_TIENDA = "https://tiendagiftven.tech/api/v1"
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+# ===== LioGames (opcion 2, solo Admin) =====
+LIO_PASSWORD = os.environ.get("LIO_PASSWORD")
+LIO_MEMBER_CODE = os.environ.get("LIO_MEMBER_CODE")
+LIO_SECRET = os.environ.get("LIO_SECRET")
+LIO_KEY_ID = os.environ.get("LIO_KEY_ID")
+LIO_SANDBOX = os.environ.get("LIO_SANDBOX") == "1"
+URL_LIO = "https://distribution.liogames.com/api/v1"
+LIO_PRODUCT_ID = 65871  # Free Fire (LATAM)
 
 HEADERS_SB = {
     "apikey": SUPABASE_KEY,
@@ -32,6 +46,65 @@ PRODUCTOS = [
     {"id": 157, "nombre": "Tarjeta Mensual", "precio": 11},
     {"id": 158, "nombre": "Pase Booyah",     "precio": 4},
 ]
+
+LIO_PRODUCTOS = [
+    {"variation_id": 533711, "nombre": "110 Diamantes",   "precio": 0.67},
+    {"variation_id": 533713, "nombre": "341 Diamantes",   "precio": 2.01},
+    {"variation_id": 533715, "nombre": "572 Diamantes",   "precio": 3.40},
+    {"variation_id": 533717, "nombre": "1166 Diamantes",  "precio": 6.31},
+    {"variation_id": 533719, "nombre": "2398 Diamantes",  "precio": 12.52},
+    {"variation_id": 533720, "nombre": "6160 Diamantes",  "precio": 31.88},
+    {"variation_id": 533724, "nombre": "Tarjeta Mensual", "precio": 9.69},
+]
+
+def lio_firmar(cuerpo_bytes):
+    return hmac.new(LIO_SECRET.encode(), cuerpo_bytes, hashlib.sha256).hexdigest()
+
+def lio_post(ruta, payload, timeout=30):
+    cuerpo = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"Content-Type": "application/json", "x-liog-sign": lio_firmar(cuerpo)}
+    if LIO_KEY_ID:
+        headers["X-LIOG-KEY-ID"] = LIO_KEY_ID
+    return requests.post(f"{URL_LIO}{ruta}", data=cuerpo, headers=headers, timeout=timeout).json()
+
+def lio_productos_con_precio():
+    """Precios GOLD en vivo; si falla, usa los precios fijos."""
+    productos = [dict(p) for p in LIO_PRODUCTOS]
+    try:
+        r = requests.get(f"{URL_LIO}/products/{LIO_PRODUCT_ID}/price-matrix", timeout=10).json()
+        precios = {row["variation_id"]: row.get("prices", {}).get("gold") for row in r.get("data", {}).get("rows", [])}
+        for p in productos:
+            if precios.get(p["variation_id"]):
+                p["precio"] = round(float(precios[p["variation_id"]]), 2)
+    except Exception:
+        pass
+    return productos
+
+def lio_etiqueta(p):
+    return f"{p['nombre']} ${p['precio']:.2f}"
+
+def lio_estado(resp):
+    """Devuelve (estado_en_mayusculas, order_id) desde la respuesta de LioGames."""
+    data = resp.get("data") or {}
+    if isinstance(data, dict) and isinstance(data.get("order"), dict):
+        data = data["order"]
+    estado = str(data.get("status") or resp.get("code") or "").upper() if isinstance(data, dict) else str(resp.get("code", "")).upper()
+    order_id = None
+    if isinstance(data, dict):
+        order_id = data.get("order_id") or data.get("id")
+    return estado, order_id
+
+LIO_EXITO = ("COMPLETED", "COMPLETE", "SUCCESS", "SUCCESSFUL", "DELIVERED", "DONE")
+LIO_PENDIENTE = ("PROCESSING", "PENDING", "ON-HOLD", "ON_HOLD", "QUEUED", "IN_PROGRESS")
+
+def lio_consultar(order_id=None, client_ref=None):
+    ruta = "/sandbox/order-status" if LIO_SANDBOX else "/order-status"
+    payload = {"member_code": LIO_MEMBER_CODE}
+    if order_id:
+        payload["order_id"] = order_id
+    if client_ref:
+        payload["client_ref"] = client_ref
+    return lio_post(ruta, payload, timeout=20)
 
 def sb_get_usuario(nombre):
     r = requests.get(
@@ -124,7 +197,7 @@ def botones(opciones):
 
 def menu_principal(chat_id, usuario, saldo):
     if usuario == "Admin":
-        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario")
+        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario\n\nLioGames (opcion 2):\n/lio - Recarga por LioGames\n/liosaldo - Saldo LioGames\n/lioestado <ref> - Estado de pedido LioGames")
     else:
         enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy")
 
@@ -175,8 +248,11 @@ def webhook():
 
     if texto == "/saldo":
         if es_admin:
-            resp = requests.get(f"{URL_TIENDA}/saldo", headers={"X-API-Key": API_KEY_TIENDA}).json()
-            enviar(chat_id, f"Saldo en tienda: ${resp.get('saldo')}")
+            try:
+                resp = requests.get(f"{URL_TIENDA}/saldo", headers={"X-API-Key": API_KEY_TIENDA}, timeout=20).json()
+                enviar(chat_id, f"Saldo en tienda: ${resp.get('saldo')}")
+            except Exception:
+                enviar(chat_id, "No se pudo consultar el saldo de la tienda. Intenta de nuevo.")
         else:
             u = sb_get_usuario(usuario)
             enviar(chat_id, f"Tu saldo: ${u['saldo']}")
@@ -402,11 +478,18 @@ def webhook():
         if texto == "Confirmar":
             p = sesion["producto"]
             id_jugador = sesion["id_jugador"]
+            sesiones[chat_id]["paso"] = "procesando"
             enviar(chat_id, "Procesando recarga...")
-            resp = requests.post(f"{URL_TIENDA}/comprar",
-                headers={"X-API-Key": API_KEY_TIENDA},
-                json={"producto_id": p["id"], "id_juego": id_jugador}
-            ).json()
+            try:
+                resp = requests.post(f"{URL_TIENDA}/comprar",
+                    headers={"X-API-Key": API_KEY_TIENDA},
+                    json={"producto_id": p["id"], "id_juego": id_jugador},
+                    timeout=60
+                ).json()
+            except Exception:
+                enviar(chat_id, "La tienda no respondio. Revisa con /reporte o en la tienda antes de reintentar, la recarga pudo haberse hecho.")
+                sesiones[chat_id]["paso"] = "menu"
+                return {"status": "ok"}
             if resp.get("ok"):
                 if not es_admin:
                     sb_descontar_saldo(usuario, p["precio"])
@@ -426,6 +509,159 @@ def webhook():
         else:
             enviar(chat_id, "Recarga cancelada.")
         sesiones[chat_id]["paso"] = "menu"
+        return {"status": "ok"}
+
+    # ===== LioGames (solo Admin) =====
+    lio_activo = bool(es_admin and LIO_PASSWORD)
+
+    if texto == "/lio" and lio_activo:
+        sesiones[chat_id]["paso"] = "lio_password"
+        enviar(chat_id, "Escribe la contrasena de LioGames:")
+        return {"status": "ok"}
+
+    if paso == "lio_password" and lio_activo:
+        if hmac.compare_digest(texto.encode(), LIO_PASSWORD.encode()):
+            sesiones[chat_id]["lio_ok"] = True
+            productos = lio_productos_con_precio()
+            sesiones[chat_id]["lio_productos"] = productos
+            sesiones[chat_id]["paso"] = "lio_elegir"
+            modo = " (SANDBOX)" if LIO_SANDBOX else ""
+            enviar(chat_id, f"LioGames{modo}\nElige el monto:", botones([lio_etiqueta(p) for p in productos]))
+        else:
+            sesiones[chat_id]["paso"] = "menu"
+            sesiones[chat_id].pop("lio_ok", None)
+            enviar(chat_id, "Contrasena incorrecta. Operacion cancelada.")
+            menu_principal(chat_id, usuario, "-")
+        return {"status": "ok"}
+
+    if paso == "lio_elegir" and lio_activo:
+        productos = sesion.get("lio_productos", [])
+        producto = next((p for p in productos if lio_etiqueta(p) == texto), None)
+        if not producto:
+            enviar(chat_id, "Elige una opcion valida.", botones([lio_etiqueta(p) for p in productos]))
+            return {"status": "ok"}
+        sesiones[chat_id]["lio_producto"] = producto
+        sesiones[chat_id]["paso"] = "lio_pedir_id"
+        enviar(chat_id, f"[LIO] {lio_etiqueta(producto)}\n\nEscribe el ID del jugador en Free Fire:")
+        return {"status": "ok"}
+
+    if paso == "lio_pedir_id" and lio_activo:
+        sesiones[chat_id]["lio_id_jugador"] = texto
+        sesiones[chat_id]["paso"] = "lio_confirmar"
+        p = sesion["lio_producto"]
+        enviar(chat_id,
+            f"Confirma la recarga LioGames:\n\n"
+            f"ID: {texto}\n"
+            f"{p['nombre']}\n"
+            f"${p['precio']:.2f}\n\n"
+            f"Confirmas?",
+            botones(["Confirmar", "Cancelar"])
+        )
+        return {"status": "ok"}
+
+    if paso == "lio_confirmar" and lio_activo:
+        if texto != "Confirmar":
+            sesiones[chat_id]["paso"] = "menu"
+            enviar(chat_id, "Recarga cancelada.")
+            return {"status": "ok"}
+        sesiones[chat_id]["paso"] = "procesando"
+        p = sesion["lio_producto"]
+        id_jugador = sesion["lio_id_jugador"]
+        client_ref = str(uuid.uuid4())
+        enviar(chat_id, "Procesando recarga LioGames...")
+        payload = {
+            "member_code": LIO_MEMBER_CODE,
+            "product_id": LIO_PRODUCT_ID,
+            "variation_id": p["variation_id"],
+            "user_id": id_jugador,
+            "client_ref": client_ref,
+        }
+        ruta = "/sandbox/order-create" if LIO_SANDBOX else "/order-create"
+        try:
+            resp = lio_post(ruta, payload, timeout=30)
+        except Exception:
+            sesiones[chat_id]["paso"] = "menu"
+            enviar(chat_id, f"LioGames no respondio. Ref: {client_ref}\nRevisa con /lioestado {client_ref} antes de reintentar.")
+            return {"status": "ok"}
+
+        estado, order_id = lio_estado(resp)
+        if not resp.get("ok") and estado not in LIO_PENDIENTE:
+            sesiones[chat_id]["paso"] = "menu"
+            enviar(chat_id, f"Error LioGames: {resp.get('code', '')} {resp.get('message', '')}".strip())
+            return {"status": "ok"}
+
+        intentos = 0
+        while estado in LIO_PENDIENTE and intentos < 5:
+            time.sleep(3)
+            intentos += 1
+            try:
+                r2 = lio_consultar(order_id=order_id, client_ref=client_ref)
+                e2, o2 = lio_estado(r2)
+                if e2:
+                    estado = e2
+                order_id = order_id or o2
+            except Exception:
+                pass
+
+        pedido = order_id or client_ref
+        if estado in LIO_EXITO or estado in LIO_PENDIENTE or resp.get("ok"):
+            sb_guardar_recarga(usuario, f"[LIO] {p['nombre']}", p["precio"], id_jugador, pedido)
+        if estado in LIO_EXITO:
+            enviar(chat_id,
+                f"Recarga LioGames exitosa!\n\n"
+                f"Jugador: {id_jugador}\n"
+                f"{p['nombre']}\n"
+                f"Pedido #: {pedido}\n"
+                f"Operador: {usuario}"
+            )
+        elif estado in LIO_PENDIENTE:
+            enviar(chat_id,
+                f"Pedido LioGames en proceso.\n\n"
+                f"{p['nombre']} | ID: {id_jugador}\n"
+                f"Ref: {client_ref}\n\n"
+                f"Consulta luego con:\n/lioestado {client_ref}"
+            )
+        else:
+            enviar(chat_id, f"Pedido LioGames: {estado or 'estado desconocido'}\nRef: {client_ref}\nConsulta con /lioestado {client_ref}")
+        sesiones[chat_id]["paso"] = "menu"
+        return {"status": "ok"}
+
+    if texto == "/liosaldo" and lio_activo:
+        if not sesion.get("lio_ok"):
+            enviar(chat_id, "Primero desbloquea LioGames con /lio.")
+            return {"status": "ok"}
+        try:
+            resp = lio_post("/balance", {"member_code": LIO_MEMBER_CODE}, timeout=20)
+            data = resp.get("data") or {}
+            saldo = data.get("balance", data.get("wallet_balance", data)) if isinstance(data, dict) else data
+            if resp.get("ok"):
+                enviar(chat_id, f"Saldo LioGames: ${saldo}")
+            else:
+                enviar(chat_id, f"Error LioGames: {resp.get('code', '')} {resp.get('message', '')}".strip())
+        except Exception:
+            enviar(chat_id, "No se pudo consultar el saldo de LioGames.")
+        return {"status": "ok"}
+
+    if texto.startswith("/lioestado") and lio_activo:
+        if not sesion.get("lio_ok"):
+            enviar(chat_id, "Primero desbloquea LioGames con /lio.")
+            return {"status": "ok"}
+        partes = texto.split()
+        if len(partes) < 2:
+            enviar(chat_id, "Uso: /lioestado <ref>")
+            return {"status": "ok"}
+        ref = partes[1]
+        try:
+            # Si es un uuid es nuestro client_ref; si no, el ID de pedido de LioGames
+            try:
+                uuid.UUID(ref)
+                resp = lio_consultar(client_ref=ref)
+            except ValueError:
+                resp = lio_consultar(order_id=ref)
+            estado, order_id = lio_estado(resp)
+            enviar(chat_id, f"Pedido LioGames\nRef: {ref}\nPedido #: {order_id or '-'}\nEstado: {estado or resp.get('message', 'desconocido')}")
+        except Exception:
+            enviar(chat_id, "No se pudo consultar el estado en LioGames.")
         return {"status": "ok"}
 
     enviar(chat_id, "Usa /recargar, /saldo o /reporte")
