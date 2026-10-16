@@ -23,6 +23,7 @@ LIO_KEY_ID = os.environ.get("LIO_KEY_ID")
 LIO_SANDBOX = os.environ.get("LIO_SANDBOX") == "1"
 URL_LIO = "https://distribution.liogames.com/api/v1"
 LIO_PRODUCT_ID = 65871  # Free Fire (LATAM)
+LIO_GAME_SLUG = "free-fire-global"  # Username API: no existe slug LATAM
 
 HEADERS_SB = {
     "apikey": SUPABASE_KEY,
@@ -105,6 +106,31 @@ def lio_consultar(order_id=None, client_ref=None):
     if client_ref:
         payload["client_ref"] = client_ref
     return lio_post(ruta, payload, timeout=20)
+
+def lio_nombre_jugador(id_jugador):
+    """Devuelve ("ok", nombre), ("no", None) si el ID no existe, o ("na", None) si no se pudo consultar."""
+    try:
+        resp = lio_post("/username-check", {"member_code": LIO_MEMBER_CODE, "game": LIO_GAME_SLUG, "user_id": id_jugador}, timeout=15)
+    except Exception:
+        return "na", None
+    if not isinstance(resp, dict):
+        return "na", None
+    data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+    found = resp.get("found", data.get("found"))
+    nombre = None
+    for fuente in (resp, data):
+        for k in ("username", "nickname", "name"):
+            if fuente.get(k):
+                nombre = str(fuente[k])
+                break
+        if nombre:
+            break
+    code = str(resp.get("code", "")).upper()
+    if resp.get("ok") and nombre and found is not False:
+        return "ok", nombre
+    if found is False or "NOT_FOUND" in code:
+        return "no", None
+    return "na", None
 
 def sb_get_usuario(nombre):
     r = requests.get(
@@ -546,12 +572,19 @@ def webhook():
         return {"status": "ok"}
 
     if paso == "lio_pedir_id" and lio_activo:
+        estado_nombre, nombre_jugador = lio_nombre_jugador(texto)
+        if estado_nombre == "no":
+            enviar(chat_id, "ID no encontrado. Escribe el ID del jugador de nuevo:")
+            return {"status": "ok"}
+        linea_nombre = f"Jugador: {nombre_jugador}" if estado_nombre == "ok" else "Nombre: no disponible"
         sesiones[chat_id]["lio_id_jugador"] = texto
+        sesiones[chat_id]["lio_nombre"] = nombre_jugador
         sesiones[chat_id]["paso"] = "lio_confirmar"
         p = sesion["lio_producto"]
         enviar(chat_id,
             f"Confirma la recarga LioGames:\n\n"
             f"ID: {texto}\n"
+            f"{linea_nombre}\n"
             f"{p['nombre']}\n"
             f"${p['precio']:.2f}\n\n"
             f"Confirmas?",
