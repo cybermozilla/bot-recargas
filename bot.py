@@ -235,6 +235,7 @@ def webhook():
 
     chat_id = datos["message"]["chat"]["id"]
     texto = datos["message"].get("text", "").strip()
+    message_id = datos["message"].get("message_id")
     sesion = sesiones.get(chat_id, {})
 
     if texto == "/start":
@@ -271,6 +272,18 @@ def webhook():
             enviar(chat_id, "Usuario o contrasena incorrectos. Escribe /start para intentar de nuevo.")
             sesiones.pop(chat_id, None)
         return {"status": "ok"}
+
+    # Un comando ("/...") en medio de un flujo lo cancela y se ejecuta el comando.
+    # Excepto en el login y en la contrasena de LioGames; 'procesando' se respeta.
+    if texto.startswith("/"):
+        if paso == "lio_password":
+            sesiones[chat_id]["paso"] = "menu"
+            enviar(chat_id, "Operacion cancelada.")
+            menu_principal(chat_id, usuario, "-")
+            return {"status": "ok"}
+        if paso not in ("menu", "procesando"):
+            sesiones[chat_id]["paso"] = "menu"
+            paso = "menu"
 
     if texto == "/saldo":
         if es_admin:
@@ -548,6 +561,11 @@ def webhook():
     if paso == "lio_password" and lio_activo:
         if hmac.compare_digest(texto.encode(), LIO_PASSWORD.encode()):
             sesiones[chat_id]["lio_ok"] = True
+            try:
+                if message_id:
+                    requests.post(f"{URL_TELEGRAM}/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            except Exception:
+                pass
             productos = lio_productos_con_precio()
             sesiones[chat_id]["lio_productos"] = productos
             sesiones[chat_id]["paso"] = "lio_elegir"
