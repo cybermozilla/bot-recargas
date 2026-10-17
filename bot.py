@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import time
 import uuid
+import re
 import threading
 from decimal import Decimal, ROUND_HALF_UP
 import requests
@@ -125,6 +126,51 @@ def lio_estado(resp):
                 break
     return estado, order_id
 
+def _a_entero(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+def lio_numero_panel(resp):
+    """Numero de pedido que muestra el panel de LioGames (p. ej. #678632). None si no viene."""
+    if not isinstance(resp, dict):
+        return None
+    data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+    fuentes = [d for d in (data.get("order") if isinstance(data.get("order"), dict) else None, data, resp) if d]
+    for f in fuentes:
+        for k in ("order_number", "number", "order_no", "wc_order_id", "display_id"):
+            n = _a_entero(f.get(k))
+            if n is not None:
+                return n
+    for f in fuentes:
+        for k in ("reference", "order_reference", "dh_ref", "ref"):
+            v = f.get(k)
+            if isinstance(v, str):
+                m = re.match(r"^DH-\d{8}-(\d+)$", v.strip(), re.I)
+                if m:
+                    return int(m.group(1))
+    return None
+
+_CLAVES_SECRETAS = ("secret", "sign", "key", "token", "password", "member_code", "authorization")
+
+def _sin_secretos(obj):
+    if isinstance(obj, dict):
+        return {k: ("***" if any(c in str(k).lower() for c in _CLAVES_SECRETAS) else _sin_secretos(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sin_secretos(v) for v in obj]
+    return obj
+
+def lio_log(etiqueta, resp):
+    """Debug: imprime la respuesta completa en los logs de Render, sin secretos."""
+    try:
+        print(f"[TCG DEBUG] {etiqueta}: {json.dumps(_sin_secretos(resp), ensure_ascii=False)}", flush=True)
+    except Exception:
+        pass
+
 LIO_EXITO = ("COMPLETED", "COMPLETE", "SUCCESS", "SUCCESSFUL", "DELIVERED", "DONE")
 LIO_PENDIENTE = ("PROCESSING", "PENDING", "ON-HOLD", "ON_HOLD", "QUEUED", "IN_PROGRESS")
 
@@ -135,7 +181,9 @@ def lio_consultar(order_id=None, client_ref=None):
         payload["order_id"] = order_id
     if client_ref:
         payload["client_ref"] = client_ref
-    return lio_post(ruta, payload, timeout=20)
+    resp = lio_post(ruta, payload, timeout=20)
+    lio_log("order-status", resp)
+    return resp
 
 def lio_nombre_jugador(id_jugador):
     """Nombre solo informativo. Devuelve el nombre, o None si no hay / no se pudo consultar."""
@@ -625,6 +673,7 @@ TCG_CMD = ("/tcg", "/lio")
 TCG_SALDO = ("/tcgsaldo", "/liosaldo")
 TCG_ESTADO = ("/tcgestado", "/lioestado")
 refs_cortos = {}  # ref corta (8) -> client_ref completo, para /tcgestado
+panel_a_interno = {}  # numero del panel (#678632) -> id interno de la API (543453)
 
 
 def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
@@ -683,6 +732,10 @@ def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
         with candado_usuario(usuario):
             return confirmar_lio(chat_id, usuario, es_admin, sesion)
 
+    if paso == "tcg_estado_pedir" and lio_activo:
+        sesiones[chat_id]["paso"] = "menu"
+        return tcg_estado(chat_id, texto.strip())
+
     return comandos_lio(chat_id, texto, sesion, usuario, es_admin, lio_activo)
 
 
@@ -737,6 +790,7 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
     ruta = "/sandbox/order-create" if LIO_SANDBOX else "/order-create"
     try:
         resp = lio_post(ruta, payload, timeout=30)
+        lio_log("order-create", resp)
     except Exception:
         # No sabemos si el pedido entro: el cobro se mantiene y se registra para revisar
         sb_guardar_recarga(usuario, f"{TCG_PREFIJO}{p['nombre']} (sin confirmar)", p["precio"], id_jugador, ref_corta)
@@ -745,6 +799,7 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
         return {"status": "ok"}
 
     estado, order_id = lio_estado(resp)
+    panel = lio_numero_panel(resp)
     if not resp.get("ok") and estado not in LIO_PENDIENTE:
         devolver()
         sesiones[chat_id]["paso"] = "menu"
@@ -761,10 +816,24 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
             if e2:
                 estado = e2
             order_id = order_id or o2
+            panel = panel or lio_numero_panel(r2)
         except Exception:
             pass
 
-    pedido = order_id if order_id is not None else ref_corta
+    if panel is None:
+        # Ultimo intento: buscar el numero del panel por client_ref
+        try:
+            r3 = lio_consultar(client_ref=client_ref)
+            panel = lio_numero_panel(r3)
+            if order_id is None:
+                order_id = lio_estado(r3)[1]
+        except Exception:
+            pass
+
+    if panel is not None and order_id is not None:
+        panel_a_interno[panel] = order_id
+    sesiones[chat_id]["tcg_ultimo"] = {"panel": panel, "interno": order_id, "client_ref": client_ref}
+    pedido = panel if panel is not None else (order_id if order_id is not None else ref_corta)
     if estado in LIO_FALLO:
         devolver()
         enviar(chat_id, f"Pedido TCG #{pedido} fallido ({estado}). No se cobro.\nTu saldo restante: ${saldo_restante()}")
@@ -812,27 +881,42 @@ def comandos_lio(chat_id, texto, sesion, usuario, es_admin, lio_activo):
     partes = texto.split()
     if partes and partes[0] in TCG_ESTADO and lio_activo:
         if len(partes) < 2:
-            enviar(chat_id, "Uso: /tcgestado <pedido>")
+            sesiones[chat_id]["paso"] = "tcg_estado_pedir"
+            enviar(chat_id, "Escribe el numero de pedido TCG:")
             return {"status": "ok"}
-        ref = partes[1]
-        try:
-            if ref.isdigit():
-                resp = lio_consultar(order_id=int(ref))
-            else:
-                completo = ref if len(ref) == 36 else refs_cortos.get(ref) or next((v for k, v in refs_cortos.items() if v.startswith(ref)), None)
-                if not completo:
-                    enviar(chat_id, f"Pedido {ref} no encontrado.")
-                    return {"status": "ok"}
-                resp = lio_consultar(client_ref=completo)
-            estado, order_id = lio_estado(resp)
-            enviar(chat_id, f"Pedido TCG #{order_id or ref}\nEstado: {estado or resp.get('message', 'desconocido')}")
-        except Exception:
-            enviar(chat_id, "No se pudo consultar el estado en TCG.")
-        return {"status": "ok"}
+        return tcg_estado(chat_id, partes[1])
 
     enviar(chat_id, "Usa /recargar, /saldo o /reporte")
     return {"status": "ok"}
 
+
+def _estado_valido(resp):
+    estado, _ = lio_estado(resp)
+    return bool(resp.get("ok")) and estado not in ("", "NOT_FOUND", "ORDER_NOT_FOUND")
+
+def tcg_estado(chat_id, ref):
+    ref = ref.lstrip("#")
+    try:
+        if ref.isdigit():
+            n = int(ref)
+            resp = lio_consultar(order_id=n)
+            if not _estado_valido(resp) and n in panel_a_interno:
+                resp = lio_consultar(order_id=panel_a_interno[n])
+            if not _estado_valido(resp):
+                enviar(chat_id, f"Pedido TCG #{ref} no encontrado.")
+                return {"status": "ok"}
+        else:
+            completo = ref if len(ref) == 36 else refs_cortos.get(ref) or next((v for k, v in refs_cortos.items() if v.startswith(ref)), None)
+            if not completo:
+                enviar(chat_id, f"Pedido {ref} no encontrado.")
+                return {"status": "ok"}
+            resp = lio_consultar(client_ref=completo)
+        estado, order_id = lio_estado(resp)
+        panel = lio_numero_panel(resp) or next((p for p, i in panel_a_interno.items() if i == order_id), None)
+        enviar(chat_id, f"Pedido TCG #{panel or order_id or ref}\nEstado: {estado or resp.get('message', 'desconocido')}")
+    except Exception:
+        enviar(chat_id, "No se pudo consultar el estado en TCG.")
+    return {"status": "ok"}
 
 @app.route("/")
 def index():
