@@ -31,6 +31,11 @@ LIO_GAME_SLUG = "free-fire-global"  # Username API: no existe slug LATAM
 LIO_NAME_SERVER = os.environ.get("LIO_NAME_SERVER", "SAC")  # se envia como server_id (prueba LATAM)
 LIO_NAME_CHECK = os.environ.get("LIO_NAME_CHECK", "1") != "0"  # 0 = no consultar el nombre
 TCG_PREFIJO = "[TCG] "
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")  # chat de Telegram del Admin para avisos de revision manual
+CHECK_TOKEN = os.environ.get("CHECK_TOKEN")      # opcional: protege /check-pendientes
+TCG_WATCHER = os.environ.get("TCG_WATCHER", "1") != "0"  # 0 = no iniciar el hilo vigilante
+TCG_WATCH_SEGUNDOS = int(os.environ.get("TCG_WATCH_SEGUNDOS", "30"))
+TCG_MAX_HORAS = 24
 
 HEADERS_SB = {
     "apikey": SUPABASE_KEY,
@@ -794,8 +799,10 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
     except Exception:
         # No sabemos si el pedido entro: el cobro se mantiene y se registra para revisar
         sb_guardar_recarga(usuario, f"{TCG_PREFIJO}{p['nombre']} (sin confirmar)", p["precio"], id_jugador, ref_corta)
+        vigilado = sb_pend_crear(chat_id, usuario, None, None, client_ref, ref_corta, p, cobra, id_jugador)
         sesiones[chat_id]["paso"] = "menu"
-        enviar(chat_id, f"TCG no respondio. Ref: {ref_corta}\nRevisa con /tcgestado {ref_corta} antes de reintentar.\nTu saldo restante: ${saldo_restante()}")
+        aviso = "\nTe aviso por aqui cuando se confirme." if vigilado else ""
+        enviar(chat_id, f"TCG no respondio. Ref: {ref_corta}\nRevisa con /tcgestado {ref_corta} antes de reintentar.\nTu saldo restante: ${saldo_restante()}{aviso}")
         return {"status": "ok"}
 
     estado, order_id = lio_estado(resp)
@@ -851,15 +858,19 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
             f"Operador: {usuario}"
         )
     elif estado in LIO_PENDIENTE:
+        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador)
+        aviso = "\nTe aviso por aqui cuando termine." if vigilado else ""
         enviar(chat_id,
             f"Pedido TCG en proceso.\n\n"
             f"{p['nombre']} | ID: {id_jugador}\n"
             f"Pedido #{pedido}\n"
             f"Tu saldo restante: ${saldo_restante()}\n\n"
-            f"Consulta luego con:\n/tcgestado {pedido}"
+            f"Consulta luego con:\n/tcgestado {pedido}{aviso}"
         )
     else:
-        enviar(chat_id, f"Pedido TCG #{pedido}: {estado or 'estado desconocido'}\nTu saldo restante: ${saldo_restante()}\nConsulta con /tcgestado {pedido}")
+        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador)
+        aviso = "\nTe aviso por aqui cuando termine." if vigilado else ""
+        enviar(chat_id, f"Pedido TCG #{pedido}: {estado or 'estado desconocido'}\nTu saldo restante: ${saldo_restante()}\nConsulta con /tcgestado {pedido}{aviso}")
     sesiones[chat_id]["paso"] = "menu"
     return {"status": "ok"}
 
@@ -918,9 +929,225 @@ def tcg_estado(chat_id, ref):
         enviar(chat_id, "No se pudo consultar el estado en TCG.")
     return {"status": "ok"}
 
+# ===== Vigilante de pedidos TCG pendientes (persistido en Supabase) =====
+URL_PEND = f"{SUPABASE_URL}/rest/v1/pendientes_tcg"
+
+def ahora_utc():
+    from datetime import timezone
+    return datetime.now(timezone.utc)
+
+def _sb_tabla_falta(r):
+    if r.status_code == 404:
+        return True
+    try:
+        cuerpo = r.json()
+        return isinstance(cuerpo, dict) and str(cuerpo.get("code", "")) in ("PGRST205", "PGRST204", "42P01", "PGRST202")
+    except Exception:
+        return False
+
+def sb_pend_crear(chat_id, usuario, internal_id, panel, client_ref, pedido_ref, p, cobrado, id_jugador):
+    """Guarda el pedido pendiente. Devuelve True si quedo vigilado; False si la tabla no existe o falla."""
+    try:
+        r = requests.post(URL_PEND, headers=dict(HEADERS_SB, Prefer="return=minimal"), json={
+            "chat_id": chat_id, "usuario": usuario,
+            "internal_order_id": internal_id, "panel_id": panel,
+            "client_ref": client_ref, "pedido_ref": str(pedido_ref),
+            "producto": p["nombre"], "monto": p["precio"], "cobrado": bool(cobrado),
+            "id_jugador": id_jugador, "estado": "pendiente", "intentos": 0,
+        }, timeout=15)
+        if r.status_code >= 300:
+            print(f"[TCG WATCH] no se pudo guardar pendiente ({r.status_code}): {getattr(r, "text", "")[:300]}", flush=True)
+            return False
+        return True
+    except Exception as e:
+        print(f"[TCG WATCH] error guardando pendiente: {e}", flush=True)
+        return False
+
+def sb_pend_liberar_trabados():
+    """Si un worker murio a mitad de revision, la fila vuelve a 'pendiente' tras 5 minutos."""
+    from datetime import timedelta
+    limite = (ahora_utc() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        requests.patch(f"{URL_PEND}?estado=eq.revisando&revisado=lt.{limite}",
+                       headers=HEADERS_SB, json={"estado": "pendiente"}, timeout=15)
+    except Exception:
+        pass
+
+def sb_pend_listar():
+    sb_pend_liberar_trabados()
+    try:
+        r = requests.get(f"{URL_PEND}?estado=eq.pendiente&select=*&order=creado.asc&limit=50", headers=HEADERS_SB, timeout=15)
+        if r.status_code >= 300:
+            print(f"[TCG WATCH] tabla pendientes_tcg no disponible ({r.status_code}). Ejecuta supabase_rpc.sql", flush=True)
+            return []
+        filas = r.json()
+        return filas if isinstance(filas, list) else []
+    except Exception as e:
+        print(f"[TCG WATCH] error listando pendientes: {e}", flush=True)
+        return []
+
+def sb_pend_cambiar(fila_id, de_estado, cambios):
+    """PATCH condicional (atomico): solo cambia si sigue en de_estado. Devuelve True si esta llamada lo gano."""
+    try:
+        r = requests.patch(
+            f"{URL_PEND}?id=eq.{fila_id}&estado=eq.{de_estado}",
+            headers=dict(HEADERS_SB, Prefer="return=representation"),
+            json=cambios, timeout=15)
+        if r.status_code >= 300:
+            return False
+        filas = r.json()
+        return isinstance(filas, list) and len(filas) > 0
+    except Exception:
+        return False
+
+def sb_marcar_recarga(usuario, pedido_ref, cambios):
+    try:
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/recargas?usuario=eq.{usuario}&pedido_id=eq.{pedido_ref}",
+            headers=HEADERS_SB, json=cambios, timeout=15)
+    except Exception as e:
+        print(f"[TCG WATCH] no se pudo actualizar recargas: {e}", flush=True)
+
+def _creado_dt(fila):
+    from datetime import timezone
+    try:
+        v = str(fila.get("creado")).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(v)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return ahora_utc()
+
+def _avisar_admin(texto):
+    destinos = [ADMIN_CHAT_ID] if ADMIN_CHAT_ID else [cid for cid, s in sesiones.items() if s.get("es_admin")]
+    for cid in destinos:
+        try:
+            enviar(cid, texto)
+        except Exception:
+            pass
+
+def _saldo_de(usuario):
+    try:
+        return sb_get_usuario(usuario)["saldo"]
+    except Exception:
+        return "?"
+
+def vigilar_fila(fila):
+    """Revisa un pendiente. Devuelve el estado final aplicado o None si sigue pendiente."""
+    fid = fila["id"]
+    # 1) Reclamar la fila (si otro worker la tomo, no hacemos nada)
+    if not sb_pend_cambiar(fid, "pendiente", {"estado": "revisando", "revisado": ahora_utc().strftime("%Y-%m-%dT%H:%M:%SZ")}):
+        return None
+    internal = fila.get("internal_order_id")
+    try:
+        r = lio_consultar(order_id=internal) if internal else lio_consultar(client_ref=fila.get("client_ref"))
+        estado, oid = lio_estado(r)
+        panel = fila.get("panel_id") or lio_numero_panel(r)
+        if not r.get("ok"):
+            estado = ""
+    except Exception:
+        estado, oid, panel = "", None, fila.get("panel_id")
+    internal = internal or oid
+    if panel and internal:
+        panel_a_interno[panel] = internal
+    pedido = panel or internal or fila.get("pedido_ref")
+    chat_id, usuario = fila["chat_id"], fila["usuario"]
+    monto = float(fila.get("monto") or 0)
+
+    if estado in LIO_EXITO:
+        if sb_pend_cambiar(fid, "revisando", {"estado": "completado", "internal_order_id": internal, "panel_id": panel}):
+            sb_marcar_recarga(usuario, fila.get("pedido_ref"), {"producto": f"{TCG_PREFIJO}{fila['producto']}", "pedido_id": pedido})
+            saldo = _saldo_de(usuario) if fila.get("cobrado") else "-"
+            enviar(chat_id,
+                f"Recarga TCG completada\n\n"
+                f"{fila['producto']}\n"
+                f"ID: {fila.get('id_jugador')}\n"
+                f"Pedido #{pedido}\n"
+                f"Tu saldo: ${saldo}")
+        return "completado"
+
+    if estado in LIO_FALLO:
+        # Marcar primero (atomico) y despues devolver: nunca se devuelve dos veces
+        if sb_pend_cambiar(fid, "revisando", {"estado": "reembolsado", "internal_order_id": internal, "panel_id": panel}):
+            sb_marcar_recarga(usuario, fila.get("pedido_ref"), {"producto": f"{TCG_PREFIJO}{fila['producto']} (REEMBOLSADO)", "monto": 0})
+            if fila.get("cobrado"):
+                try:
+                    sb_recargar_saldo(usuario, monto)
+                    enviar(chat_id,
+                        f"Pedido TCG #{pedido} fallido ({estado}).\n\n"
+                        f"{fila['producto']} | ID: {fila.get('id_jugador')}\n"
+                        f"Se te devolvieron ${monto:.2f}\n"
+                        f"Tu saldo: ${_saldo_de(usuario)}")
+                except Exception as e:
+                    print(f"[TCG WATCH] FALLO el reembolso de {usuario} ${monto} pedido {pedido}: {e}", flush=True)
+                    _avisar_admin(f"Revisar: no se pudo devolver ${monto:.2f} a {usuario} (pedido TCG #{pedido}).")
+            else:
+                enviar(chat_id, f"Pedido TCG #{pedido} fallido ({estado}).\n{fila['producto']} | ID: {fila.get('id_jugador')}\nNo se cobro saldo.")
+        return "reembolsado"
+
+    # Sigue pendiente (o sin respuesta)
+    vencido = (ahora_utc() - _creado_dt(fila)).total_seconds() > TCG_MAX_HORAS * 3600
+    if vencido:
+        if sb_pend_cambiar(fid, "revisando", {"estado": "revision_manual", "internal_order_id": internal, "panel_id": panel}):
+            _avisar_admin(
+                f"Revision manual TCG: pedido #{pedido} lleva mas de {TCG_MAX_HORAS}h sin terminar.\n"
+                f"Usuario: {usuario} | {fila['producto']} | ID: {fila.get('id_jugador')}\n"
+                f"Monto: ${monto:.2f} ({'cobrado' if fila.get('cobrado') else 'no cobrado'}). El cobro se mantiene.")
+        return "revision_manual"
+    sb_pend_cambiar(fid, "revisando", {"estado": "pendiente", "intentos": int(fila.get("intentos") or 0) + 1,
+                                        "internal_order_id": internal, "panel_id": panel})
+    return None
+
+_pasada_lock = threading.Lock()
+
+def watcher_pasada():
+    """Una vuelta del vigilante. Devuelve un resumen."""
+    resumen = {"revisados": 0, "finalizados": 0}
+    if not SUPABASE_URL or not LIO_MEMBER_CODE or not LIO_SECRET:
+        return resumen
+    if not _pasada_lock.acquire(blocking=False):
+        resumen["ocupado"] = True
+        return resumen
+    try:
+        for fila in sb_pend_listar():
+            resumen["revisados"] += 1
+            try:
+                if vigilar_fila(fila):
+                    resumen["finalizados"] += 1
+            except Exception as e:
+                print(f"[TCG WATCH] error en fila {fila.get('id')}: {e}", flush=True)
+    finally:
+        _pasada_lock.release()
+    return resumen
+
+def _hilo_vigilante():
+    while True:
+        try:
+            watcher_pasada()
+        except Exception as e:
+            print(f"[TCG WATCH] error en la pasada: {e}", flush=True)
+        time.sleep(TCG_WATCH_SEGUNDOS)
+
+_vigilante_iniciado = False
+
+def iniciar_vigilante():
+    global _vigilante_iniciado
+    if _vigilante_iniciado or not TCG_WATCHER:
+        return False
+    _vigilante_iniciado = True
+    threading.Thread(target=_hilo_vigilante, name="tcg-vigilante", daemon=True).start()
+    return True
+
+@app.route("/check-pendientes")
+def check_pendientes():
+    if CHECK_TOKEN and not hmac.compare_digest(request.args.get("token", ""), CHECK_TOKEN):
+        return {"ok": False, "error": "token invalido"}, 403
+    return {"ok": True, **watcher_pasada()}, 200
+
 @app.route("/")
 def index():
     return "Bot activo v6", 200
+
+iniciar_vigilante()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
