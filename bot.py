@@ -71,6 +71,24 @@ LIO_PRODUCTOS = [
     {"variation_id": 533724, "nombre": "Tarjeta Mensual", "costo": 9.69,  "markup": "0.15"},
 ]
 
+# ===== TCG Roblox (US): tarjetas de regalo en USD (NO Robux). Sin ID de jugador. =====
+ROBLOX_PRODUCT_ID = 535408
+# costo = GOLD de LioGames (respaldo); markup en % para que el precio siga al costo si Lio lo cambia.
+# 75/100/200 USD (535419/535420/535421) y 5 USD (535412) quedan fuera del menu.
+ROBLOX_PRODUCTOS = [
+    {"variation_id": 535413, "nombre": "Roblox US 10 USD", "costo": 8.95,  "markup": "0.10"},
+    {"variation_id": 535414, "nombre": "Roblox US 15 USD", "costo": 14.01, "markup": "0.0635"},
+    {"variation_id": 535415, "nombre": "Roblox US 20 USD", "costo": 18.69, "markup": "0.0647"},
+    {"variation_id": 535416, "nombre": "Roblox US 25 USD", "costo": 22.25, "markup": "0.10"},
+    {"variation_id": 535417, "nombre": "Roblox US 30 USD", "costo": 28.15, "markup": "0.0568"},
+    {"variation_id": 535418, "nombre": "Roblox US 50 USD", "costo": 45.48, "markup": "0.0774"},
+]
+for _p in ROBLOX_PRODUCTOS:
+    _p.update(tipo="roblox", product_id=ROBLOX_PRODUCT_ID)
+
+TCG_OP_FF = "Free Fire 💎"
+TCG_OP_ROBLOX = "Roblox USD 🎁"
+
 def precio_reventa(costo, markup):
     valor = Decimal(str(costo)) * (Decimal("1") + Decimal(str(markup)))
     return float(valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
@@ -95,11 +113,13 @@ def lio_post(ruta, payload, timeout=30):
         headers["X-LIOG-KEY-ID"] = LIO_KEY_ID
     return requests.post(f"{URL_LIO}{ruta}", data=cuerpo, headers=headers, timeout=timeout).json()
 
-def lio_productos_con_precio():
+def lio_productos_con_precio(lista=None, product_id=None):
     """Precios GOLD en vivo; si falla, usa los precios fijos."""
-    productos = [dict(p) for p in LIO_PRODUCTOS]
+    lista = LIO_PRODUCTOS if lista is None else lista
+    product_id = product_id or LIO_PRODUCT_ID
+    productos = [dict(p) for p in lista]
     try:
-        r = requests.get(f"{URL_LIO}/products/{LIO_PRODUCT_ID}/price-matrix", timeout=10).json()
+        r = requests.get(f"{URL_LIO}/products/{product_id}/price-matrix", timeout=10).json()
         precios = {row["variation_id"]: row.get("prices", {}).get("gold") for row in r.get("data", {}).get("rows", [])}
         for p in productos:
             if precios.get(p["variation_id"]):
@@ -109,6 +129,9 @@ def lio_productos_con_precio():
     for p in productos:
         p["precio"] = precio_reventa(p["costo"], p["markup"])
     return productos
+
+def roblox_productos_con_precio():
+    return lio_productos_con_precio(ROBLOX_PRODUCTOS, ROBLOX_PRODUCT_ID)
 
 def lio_etiqueta(p):
     return f"{p['nombre']} ${p['precio']:.2f}"
@@ -169,12 +192,133 @@ def _sin_secretos(obj):
         return [_sin_secretos(v) for v in obj]
     return obj
 
-def lio_log(etiqueta, resp):
-    """Debug: imprime la respuesta completa en los logs de Render, sin secretos."""
+# ===== Codigo de tarjetas (Roblox): el campo exacto de LioGames aun no se conoce =====
+_K_CODIGO = {"code", "codes", "pin", "pins", "pincode", "pinnumber", "voucher", "vouchers", "vouchercode",
+             "vouchercodes", "serial", "serials", "serialnumber", "serialno", "sn", "cardcode", "cardcodes",
+             "cardnumber", "cardpin", "redeemcode", "redemptioncode", "giftcode", "giftcardcode", "claimcode",
+             "licensekey", "licensekeys", "cardkey", "productkey", "activationcode", "codigo", "codigos"}
+_K_CONTENEDOR = {"delivery", "deliveries", "deliverydata", "deliverydetails", "deliveryinfo", "delivered",
+                 "items", "cards", "giftcard", "giftcards", "voucherdata", "fulfillment", "fulfilment",
+                 "result", "results", "lines", "entries"}
+_K_NO_CODIGO = {"id", "orderid", "productid", "variationid", "status", "message", "name", "label", "title",
+                "type", "currency", "createdat", "updatedat", "date", "expiresat", "expiry", "expiration",
+                "product", "productname", "variation", "variationname", "url", "image", "note", "notes", "sku",
+                "price", "amount", "total", "quantity", "qty", "clientref", "reference", "ordernumber", "number",
+                "userid", "serverid", "membercode", "region", "country", "description", "instructions"}
+_RE_CODIGO = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9\- ]{2,62})[A-Za-z0-9]$")
+_RE_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_RE_FECHA = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_RE_GRUPOS = re.compile(r"^[A-Z0-9]{3,}(?:[- ][A-Z0-9]{3,})+$")
+_RE_ETIQUETA = re.compile(r"(?i)\b(c[oó]digo|code|pin|serial|s/?n|voucher|card(?:\s*number)?)\s*(?:no\.?|number|#)?\s*[:=#]\s*([A-Za-z0-9][A-Za-z0-9\-]{3,62}[A-Za-z0-9])")
+
+def _norm_clave(k):
+    return re.sub(r"[^a-z0-9]", "", str(k).lower())
+
+def _clave_no_codigo(k):
+    """Campos que nunca son el codigo (ids, referencias, fechas...)."""
+    if k in _K_CODIGO:
+        return False
+    return (k in _K_NO_CODIGO or k.endswith("id") or k.endswith("ids") or "ref" in k
+            or "date" in k or "time" in k or k.endswith("at"))
+
+def parece_codigo(v):
+    """True si el valor parece un codigo de tarjeta (no un estado, fecha, uuid o id corto)."""
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, int):
+        return v >= 100000
+    if not isinstance(v, str):
+        return False
+    v = v.strip()
+    if len(v) < 6 or len(v) > 64 or not _RE_CODIGO.match(v) or "  " in v:
+        return False
+    if _RE_UUID.match(v) or _RE_FECHA.match(v) or re.match(r"^DH-\d{8}-\d+$", v, re.I):
+        return False
+    return bool(re.search(r"\d", v)) or bool(_RE_GRUPOS.match(v))
+
+def _etiqueta_codigo(clave):
+    k = _norm_clave(clave)
+    if k.startswith("pin") or k == "cardpin":
+        return "PIN"
+    if k.startswith("serial") or k == "sn":
+        return "Serial"
+    return "Codigo"
+
+def _codigos_de_texto(texto, clave):
+    hallados = []
+    for m in _RE_ETIQUETA.finditer(texto):
+        lab = m.group(1).lower()
+        etiqueta = "PIN" if lab == "pin" else ("Serial" if lab.startswith("serial") or lab.replace("/", "") == "sn" else _etiqueta_codigo(clave))
+        if parece_codigo(m.group(2)):
+            hallados.append((etiqueta, m.group(2)))
+    if not hallados and parece_codigo(texto):
+        hallados.append((_etiqueta_codigo(clave), texto.strip()))
+    return hallados
+
+def extraer_codigos(resp, excluir=()):
+    """Busca de forma recursiva los codigos/PIN/serial en la respuesta de LioGames.
+    Devuelve [(etiqueta, valor, ruta)] sin repetidos."""
+    excluir = {str(x) for x in excluir if x is not None}
+    hallados = []
+
+    def agregar(etiqueta, valor, ruta):
+        valor = str(valor).strip()
+        if valor in excluir or any(valor == h[1] for h in hallados):
+            return
+        hallados.append((etiqueta, valor, ruta))
+
+    def visitar(obj, ruta, clave, en_contenedor, raiz):
+        k = _norm_clave(clave) if clave is not None else ""
+        if isinstance(obj, dict):
+            for ck, cv in obj.items():
+                if raiz and ck in ("code", "message", "ok"):
+                    continue  # code de la raiz = codigo de estado de la API
+                nk = _norm_clave(ck)
+                visitar(cv, f"{ruta}.{ck}" if ruta else str(ck), ck,
+                        en_contenedor or nk in _K_CONTENEDOR or nk in _K_CODIGO, False)
+        elif isinstance(obj, list):
+            for i, cv in enumerate(obj):
+                visitar(cv, f"{ruta}[{i}]", clave, en_contenedor or k in _K_CONTENEDOR or k in _K_CODIGO, False)
+        elif _clave_no_codigo(k):
+            return
+        elif k in _K_CODIGO or k in _K_CONTENEDOR or en_contenedor:
+            if isinstance(obj, str):
+                for etiqueta, valor in _codigos_de_texto(obj, clave):
+                    agregar(etiqueta, valor, ruta)
+            elif parece_codigo(obj) and k in _K_CODIGO:
+                agregar(_etiqueta_codigo(clave), obj, ruta)
+
     try:
-        print(f"[TCG DEBUG] {etiqueta}: {json.dumps(_sin_secretos(resp), ensure_ascii=False)}", flush=True)
+        visitar(resp, "", None, False, True)
     except Exception:
         pass
+    return hallados
+
+def _ocultar_codigos(obj, clave=None, en_contenedor=False):
+    """Para los logs: deja ver el campo pero no el codigo completo (quien lo vea lo podria canjear)."""
+    k = _norm_clave(clave) if clave is not None else ""
+    if isinstance(obj, dict):
+        return {ck: _ocultar_codigos(cv, ck, en_contenedor or _norm_clave(ck) in _K_CONTENEDOR or _norm_clave(ck) in _K_CODIGO)
+                for ck, cv in obj.items()}
+    if isinstance(obj, list):
+        return [_ocultar_codigos(cv, clave, en_contenedor) for cv in obj]
+    if _clave_no_codigo(k) or not (k in _K_CODIGO or en_contenedor):
+        return obj
+    if isinstance(obj, str) and (parece_codigo(obj) or _RE_ETIQUETA.search(obj)):
+        return f"{obj.strip()[:3]}***({len(obj.strip())})"
+    if isinstance(obj, int) and parece_codigo(obj):
+        return f"{str(obj)[:3]}***({len(str(obj))})"
+    return obj
+
+def lio_log(etiqueta, resp):
+    """Debug: imprime la respuesta completa en los logs de Render, sin secretos ni codigos completos."""
+    try:
+        print(f"[TCG DEBUG] {etiqueta}: {json.dumps(_ocultar_codigos(_sin_secretos(resp)), ensure_ascii=False)}", flush=True)
+    except Exception:
+        pass
+
+def _texto_codigos(codigos):
+    return "\n".join(f"{e}: {v}" for e, v, _ in codigos)
 
 LIO_EXITO = ("COMPLETED", "COMPLETE", "SUCCESS", "SUCCESSFUL", "DELIVERED", "DONE")
 LIO_PENDIENTE = ("PROCESSING", "PENDING", "ON-HOLD", "ON_HOLD", "QUEUED", "IN_PROGRESS")
@@ -333,7 +477,7 @@ def botones(opciones):
 
 def menu_principal(chat_id, usuario, saldo):
     if usuario == "Admin":
-        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario\n\nTCG (opcion 2):\n/tcg - Recarga por TCG\n/tcgsaldo - Saldo TCG\n/tcgestado <pedido> - Estado de pedido TCG")
+        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario\n\nTCG (opcion 2):\n/tcg - Recarga por TCG (Free Fire / Roblox)\n/tcgsaldo - Saldo TCG\n/tcgestado <pedido> - Estado de pedido TCG")
     else:
         extra = "\n/tcg - Recarga por TCG" if not LIO_SOLO_ADMIN else ""
         enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy{extra}")
@@ -685,12 +829,54 @@ def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
     # ===== TCG (LioGames) =====
     lio_activo = bool(es_admin or not LIO_SOLO_ADMIN)
 
+    modo = " (SANDBOX)" if LIO_SANDBOX else ""
     if texto in TCG_CMD and lio_activo:
-        productos = lio_productos_con_precio()
-        sesiones[chat_id]["lio_productos"] = productos
-        sesiones[chat_id]["paso"] = "lio_elegir"
-        modo = " (SANDBOX)" if LIO_SANDBOX else ""
-        enviar(chat_id, f"TCG{modo}\nElige el monto:", botones([lio_etiqueta(p) for p in productos]))
+        sesiones[chat_id]["paso"] = "tcg_tipo"
+        enviar(chat_id, f"TCG{modo}\nQue deseas comprar?", botones([TCG_OP_FF, TCG_OP_ROBLOX]))
+        return {"status": "ok"}
+
+    if paso == "tcg_tipo" and lio_activo:
+        t = texto.lower()
+        if t.startswith("free fire") or t == "ff":
+            productos = lio_productos_con_precio()
+            sesiones[chat_id]["lio_productos"] = productos
+            sesiones[chat_id]["paso"] = "lio_elegir"
+            enviar(chat_id, f"TCG{modo}\nElige el monto:", botones([lio_etiqueta(p) for p in productos]))
+        elif t.startswith("roblox"):
+            productos = roblox_productos_con_precio()
+            sesiones[chat_id]["rbx_productos"] = productos
+            sesiones[chat_id]["paso"] = "rbx_elegir"
+            enviar(chat_id, f"TCG{modo} - Roblox (US) tarjeta de regalo en USD\nElige la tarjeta:", botones([lio_etiqueta(p) for p in productos]))
+        else:
+            enviar(chat_id, "Elige una opcion valida.", botones([TCG_OP_FF, TCG_OP_ROBLOX]))
+        return {"status": "ok"}
+
+    if paso == "rbx_elegir" and lio_activo:
+        productos = sesion.get("rbx_productos", [])
+        producto = next((p for p in productos if lio_etiqueta(p) == texto), None)
+        if not producto:
+            enviar(chat_id, "Elige una opcion valida.", botones([lio_etiqueta(p) for p in productos]))
+            return {"status": "ok"}
+        saldo_txt = "-"
+        if lio_cobra_saldo(usuario, es_admin):
+            u = sb_get_usuario(usuario)
+            if float(u["saldo"]) <= 0 or producto["precio"] > float(u["saldo"]):
+                enviar(chat_id, f"Saldo insuficiente. Tu saldo: ${u['saldo']}")
+                sesiones[chat_id]["paso"] = "menu"
+                return {"status": "ok"}
+            saldo_txt = u["saldo"]
+        sesiones[chat_id]["lio_producto"] = producto
+        sesiones[chat_id]["lio_id_jugador"] = "-"
+        sesiones[chat_id]["lio_nombre"] = None
+        sesiones[chat_id]["paso"] = "lio_confirmar"
+        enviar(chat_id,
+            f"Confirma la compra TCG:\n\n"
+            f"{producto['nombre']} (tarjeta de regalo)\n"
+            f"Precio: ${producto['precio']:.2f}\n"
+            f"Tu saldo: ${saldo_txt}\n\n"
+            f"Confirmas?",
+            botones(["Confirmar", "Cancelar"])
+        )
         return {"status": "ok"}
 
     if paso == "lio_elegir" and lio_activo:
@@ -746,9 +932,22 @@ def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
 
 LIO_FALLO = ("FAILED", "FAIL", "CANCELLED", "CANCELED", "REFUNDED", "REJECTED", "ERROR")
 
+def es_roblox(p):
+    return p.get("tipo") == "roblox" or str(p.get("producto") or p.get("nombre") or "").startswith("Roblox")
+
+def _linea_producto(nombre, id_jugador, roblox):
+    return nombre if roblox else f"{nombre} | ID: {id_jugador}"
+
+def _sin_codigo(chat_id, usuario, nombre, pedido):
+    """Completado pero sin codigo en la respuesta: el codigo esta en el panel de LioGames."""
+    if ADMIN_CHAT_ID and str(ADMIN_CHAT_ID) != str(chat_id):
+        _avisar_admin(f"Revisar: pedido TCG #{pedido} ({nombre}) de {usuario} completado pero el codigo no llego por la API. "
+                      f"Buscalo en el panel de LioGames y enviaselo.")
+
 def confirmar_lio(chat_id, usuario, es_admin, sesion):
     p = sesion["lio_producto"]
-    id_jugador = sesion["lio_id_jugador"]
+    roblox = es_roblox(p)
+    id_jugador = "-" if roblox else sesion["lio_id_jugador"]
     cobra = lio_cobra_saldo(usuario, es_admin)
     # Cobro por adelantado (atomico): si no alcanza, no se hace el pedido
     if cobra:
@@ -784,14 +983,17 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
     client_ref = str(uuid.uuid4())
     ref_corta = client_ref[:8]
     refs_cortos[ref_corta] = client_ref
-    enviar(chat_id, "Procesando recarga TCG...")
+    enviar(chat_id, "Procesando compra TCG..." if roblox else "Procesando recarga TCG...")
     payload = {
         "member_code": LIO_MEMBER_CODE,
-        "product_id": LIO_PRODUCT_ID,
+        "product_id": p.get("product_id", LIO_PRODUCT_ID),
         "variation_id": p["variation_id"],
-        "user_id": id_jugador,
-        "client_ref": client_ref,
     }
+    if not roblox:
+        payload["user_id"] = id_jugador  # tarjetas (perfil no_input): sin user_id
+    payload["client_ref"] = client_ref
+    tipo = "roblox" if roblox else "ff"
+    respuestas = []
     ruta = "/sandbox/order-create" if LIO_SANDBOX else "/order-create"
     try:
         resp = lio_post(ruta, payload, timeout=30)
@@ -799,12 +1001,13 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
     except Exception:
         # No sabemos si el pedido entro: el cobro se mantiene y se registra para revisar
         sb_guardar_recarga(usuario, f"{TCG_PREFIJO}{p['nombre']} (sin confirmar)", p["precio"], id_jugador, ref_corta)
-        vigilado = sb_pend_crear(chat_id, usuario, None, None, client_ref, ref_corta, p, cobra, id_jugador)
+        vigilado = sb_pend_crear(chat_id, usuario, None, None, client_ref, ref_corta, p, cobra, id_jugador, tipo)
         sesiones[chat_id]["paso"] = "menu"
         aviso = "\nTe aviso por aqui cuando se confirme." if vigilado else ""
         enviar(chat_id, f"TCG no respondio. Ref: {ref_corta}\nRevisa con /tcgestado {ref_corta} antes de reintentar.\nTu saldo restante: ${saldo_restante()}{aviso}")
         return {"status": "ok"}
 
+    respuestas.append(resp)
     estado, order_id = lio_estado(resp)
     panel = lio_numero_panel(resp)
     if not resp.get("ok") and estado not in LIO_PENDIENTE:
@@ -819,6 +1022,7 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
         intentos += 1
         try:
             r2 = lio_consultar(order_id=order_id, client_ref=client_ref)
+            respuestas.append(r2)
             e2, o2 = lio_estado(r2)
             if e2:
                 estado = e2
@@ -831,6 +1035,7 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
         # Ultimo intento: buscar el numero del panel por client_ref
         try:
             r3 = lio_consultar(client_ref=client_ref)
+            respuestas.append(r3)
             panel = lio_numero_panel(r3)
             if order_id is None:
                 order_id = lio_estado(r3)[1]
@@ -848,7 +1053,39 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
         return {"status": "ok"}
     sb_guardar_recarga(usuario, f"{TCG_PREFIJO}{p['nombre']}", p["precio"], id_jugador, pedido)
     nombre_jug = sesion.get("lio_nombre") or id_jugador
-    if estado in LIO_EXITO:
+    if roblox and estado in LIO_EXITO:
+        excluir = (client_ref, order_id, panel)
+        codigos = [c for r in respuestas for c in extraer_codigos(r, excluir)]
+        if not codigos:
+            # La entrega (codigo / S/N) puede venir solo en order-status
+            try:
+                r4 = lio_consultar(order_id=order_id, client_ref=client_ref) if order_id else lio_consultar(client_ref=client_ref)
+                codigos = extraer_codigos(r4, excluir)
+            except Exception:
+                pass
+        codigos = list({c[1]: c for c in codigos}.values())
+        if codigos:
+            print(f"[TCG DEBUG] codigo encontrado en: {', '.join(c[2] for c in codigos)}", flush=True)
+            enviar(chat_id,
+                f"Compra TCG exitosa!\n\n"
+                f"{p['nombre']}\n"
+                f"{_texto_codigos(codigos)}\n"
+                f"Pedido #: {pedido}\n"
+                f"Tu saldo restante: ${saldo_restante()}\n"
+                f"Operador: {usuario}"
+            )
+        else:
+            print(f"[TCG DEBUG] pedido {pedido} completado sin codigo en la respuesta", flush=True)
+            enviar(chat_id,
+                f"Compra TCG completada, pero el codigo no llego por la API.\n\n"
+                f"{p['nombre']}\n"
+                f"Pedido #: {pedido}\n"
+                f"Revisa el codigo en el panel de LioGames (pedido #{pedido}) o con /tcgestado {pedido}\n"
+                f"Tu saldo restante: ${saldo_restante()}\n"
+                f"Operador: {usuario}"
+            )
+            _sin_codigo(chat_id, usuario, p["nombre"], pedido)
+    elif estado in LIO_EXITO:
         enviar(chat_id,
             f"Recarga TCG exitosa!\n\n"
             f"Jugador: {nombre_jug}\n"
@@ -858,17 +1095,20 @@ def confirmar_lio(chat_id, usuario, es_admin, sesion):
             f"Operador: {usuario}"
         )
     elif estado in LIO_PENDIENTE:
-        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador)
-        aviso = "\nTe aviso por aqui cuando termine." if vigilado else ""
+        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador, tipo)
+        if roblox:
+            aviso = "\nTe aviso y te envio el codigo por aqui cuando termine." if vigilado else ""
+        else:
+            aviso = "\nTe aviso por aqui cuando termine." if vigilado else ""
         enviar(chat_id,
             f"Pedido TCG en proceso.\n\n"
-            f"{p['nombre']} | ID: {id_jugador}\n"
+            f"{_linea_producto(p['nombre'], id_jugador, roblox)}\n"
             f"Pedido #{pedido}\n"
             f"Tu saldo restante: ${saldo_restante()}\n\n"
             f"Consulta luego con:\n/tcgestado {pedido}{aviso}"
         )
     else:
-        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador)
+        vigilado = sb_pend_crear(chat_id, usuario, order_id, panel, client_ref, pedido, p, cobra, id_jugador, tipo)
         aviso = "\nTe aviso por aqui cuando termine." if vigilado else ""
         enviar(chat_id, f"Pedido TCG #{pedido}: {estado or 'estado desconocido'}\nTu saldo restante: ${saldo_restante()}\nConsulta con /tcgestado {pedido}{aviso}")
     sesiones[chat_id]["paso"] = "menu"
@@ -905,10 +1145,17 @@ def _estado_valido(resp):
     estado, _ = lio_estado(resp)
     return bool(resp.get("ok")) and estado not in ("", "NOT_FOUND", "ORDER_NOT_FOUND")
 
+def _es_respuesta_roblox(resp):
+    try:
+        t = json.dumps(resp).lower()
+    except Exception:
+        return False
+    return "roblox" in t or str(ROBLOX_PRODUCT_ID) in t
+
 def tcg_estado(chat_id, ref):
     ref = ref.lstrip("#")
     try:
-        if ref.isdigit():
+        if ref.isdigit() and ref not in refs_cortos:
             n = int(ref)
             resp = lio_consultar(order_id=n)
             if not _estado_valido(resp) and n in panel_a_interno:
@@ -924,7 +1171,12 @@ def tcg_estado(chat_id, ref):
             resp = lio_consultar(client_ref=completo)
         estado, order_id = lio_estado(resp)
         panel = lio_numero_panel(resp) or next((p for p, i in panel_a_interno.items() if i == order_id), None)
-        enviar(chat_id, f"Pedido TCG #{panel or order_id or ref}\nEstado: {estado or resp.get('message', 'desconocido')}")
+        texto_estado = f"Pedido TCG #{panel or order_id or ref}\nEstado: {estado or resp.get('message', 'desconocido')}"
+        if estado in LIO_EXITO and (_es_respuesta_roblox(resp) or str(LIO_PRODUCT_ID) not in json.dumps(resp)):
+            codigos = extraer_codigos(resp, (order_id, panel))
+            if codigos:
+                texto_estado += "\n" + _texto_codigos(codigos)
+        enviar(chat_id, texto_estado)
     except Exception:
         enviar(chat_id, "No se pudo consultar el estado en TCG.")
     return {"status": "ok"}
@@ -945,16 +1197,31 @@ def _sb_tabla_falta(r):
     except Exception:
         return False
 
-def sb_pend_crear(chat_id, usuario, internal_id, panel, client_ref, pedido_ref, p, cobrado, id_jugador):
-    """Guarda el pedido pendiente. Devuelve True si quedo vigilado; False si la tabla no existe o falla."""
+def _falta_columna_tipo(r):
     try:
-        r = requests.post(URL_PEND, headers=dict(HEADERS_SB, Prefer="return=minimal"), json={
-            "chat_id": chat_id, "usuario": usuario,
-            "internal_order_id": internal_id, "panel_id": panel,
-            "client_ref": client_ref, "pedido_ref": str(pedido_ref),
-            "producto": p["nombre"], "monto": p["precio"], "cobrado": bool(cobrado),
-            "id_jugador": id_jugador, "estado": "pendiente", "intentos": 0,
-        }, timeout=15)
+        cuerpo = r.json()
+    except Exception:
+        cuerpo = None
+    texto = (json.dumps(cuerpo) if cuerpo is not None else str(getattr(r, "text", ""))).lower()
+    return r.status_code in (400, 404) and ("pgrst204" in texto or "tipo" in texto or "42703" in texto)
+
+def sb_pend_crear(chat_id, usuario, internal_id, panel, client_ref, pedido_ref, p, cobrado, id_jugador, tipo="ff"):
+    """Guarda el pedido pendiente. Devuelve True si quedo vigilado; False si la tabla no existe o falla."""
+    fila = {
+        "chat_id": chat_id, "usuario": usuario,
+        "internal_order_id": internal_id, "panel_id": panel,
+        "client_ref": client_ref, "pedido_ref": str(pedido_ref),
+        "producto": p["nombre"], "monto": p["precio"], "cobrado": bool(cobrado),
+        "id_jugador": id_jugador, "estado": "pendiente", "intentos": 0,
+    }
+    if tipo and tipo != "ff":
+        fila["tipo"] = tipo  # columna opcional; si no existe, el tipo se deduce del nombre del producto
+    try:
+        r = requests.post(URL_PEND, headers=dict(HEADERS_SB, Prefer="return=minimal"), json=fila, timeout=15)
+        if r.status_code >= 300 and "tipo" in fila and _falta_columna_tipo(r):
+            print("[TCG WATCH] falta la columna pendientes_tcg.tipo (ejecuta supabase_rpc.sql); guardando sin ella", flush=True)
+            fila.pop("tipo")
+            r = requests.post(URL_PEND, headers=dict(HEADERS_SB, Prefer="return=minimal"), json=fila, timeout=15)
         if r.status_code >= 300:
             print(f"[TCG WATCH] no se pudo guardar pendiente ({r.status_code}): {getattr(r, "text", "")[:300]}", flush=True)
             return False
@@ -1052,6 +1319,32 @@ def vigilar_fila(fila):
     pedido = panel or internal or fila.get("pedido_ref")
     chat_id, usuario = fila["chat_id"], fila["usuario"]
     monto = float(fila.get("monto") or 0)
+    roblox = (fila.get("tipo") == "roblox") or (not fila.get("tipo") and es_roblox(fila))
+    linea = _linea_producto(fila["producto"], fila.get("id_jugador"), roblox)
+
+    if estado in LIO_EXITO and roblox:
+        if sb_pend_cambiar(fid, "revisando", {"estado": "completado", "internal_order_id": internal, "panel_id": panel}):
+            sb_marcar_recarga(usuario, fila.get("pedido_ref"), {"producto": f"{TCG_PREFIJO}{fila['producto']}", "pedido_id": pedido})
+            saldo = _saldo_de(usuario) if fila.get("cobrado") else "-"
+            codigos = extraer_codigos(r, (fila.get("client_ref"), internal, panel))
+            if codigos:
+                print(f"[TCG DEBUG] codigo encontrado en: {', '.join(c[2] for c in codigos)}", flush=True)
+                enviar(chat_id,
+                    f"Compra TCG completada\n\n"
+                    f"{fila['producto']}\n"
+                    f"{_texto_codigos(codigos)}\n"
+                    f"Pedido #{pedido}\n"
+                    f"Tu saldo: ${saldo}")
+            else:
+                print(f"[TCG DEBUG] pedido {pedido} completado sin codigo en la respuesta", flush=True)
+                enviar(chat_id,
+                    f"Compra TCG completada, pero el codigo no llego por la API.\n\n"
+                    f"{fila['producto']}\n"
+                    f"Pedido #{pedido}\n"
+                    f"Revisa el codigo en el panel de LioGames (pedido #{pedido}) o con /tcgestado {pedido}\n"
+                    f"Tu saldo: ${saldo}")
+                _sin_codigo(chat_id, usuario, fila["producto"], pedido)
+        return "completado"
 
     if estado in LIO_EXITO:
         if sb_pend_cambiar(fid, "revisando", {"estado": "completado", "internal_order_id": internal, "panel_id": panel}):
@@ -1074,14 +1367,14 @@ def vigilar_fila(fila):
                     sb_recargar_saldo(usuario, monto)
                     enviar(chat_id,
                         f"Pedido TCG #{pedido} fallido ({estado}).\n\n"
-                        f"{fila['producto']} | ID: {fila.get('id_jugador')}\n"
+                        f"{linea}\n"
                         f"Se te devolvieron ${monto:.2f}\n"
                         f"Tu saldo: ${_saldo_de(usuario)}")
                 except Exception as e:
                     print(f"[TCG WATCH] FALLO el reembolso de {usuario} ${monto} pedido {pedido}: {e}", flush=True)
                     _avisar_admin(f"Revisar: no se pudo devolver ${monto:.2f} a {usuario} (pedido TCG #{pedido}).")
             else:
-                enviar(chat_id, f"Pedido TCG #{pedido} fallido ({estado}).\n{fila['producto']} | ID: {fila.get('id_jugador')}\nNo se cobro saldo.")
+                enviar(chat_id, f"Pedido TCG #{pedido} fallido ({estado}).\n{linea}\nNo se cobro saldo.")
         return "reembolsado"
 
     # Sigue pendiente (o sin respuesta)
@@ -1090,7 +1383,7 @@ def vigilar_fila(fila):
         if sb_pend_cambiar(fid, "revisando", {"estado": "revision_manual", "internal_order_id": internal, "panel_id": panel}):
             _avisar_admin(
                 f"Revision manual TCG: pedido #{pedido} lleva mas de {TCG_MAX_HORAS}h sin terminar.\n"
-                f"Usuario: {usuario} | {fila['producto']} | ID: {fila.get('id_jugador')}\n"
+                f"Usuario: {usuario} | {linea}\n"
                 f"Monto: ${monto:.2f} ({'cobrado' if fila.get('cobrado') else 'no cobrado'}). El cobro se mantiene.")
         return "revision_manual"
     sb_pend_cambiar(fid, "revisando", {"estado": "pendiente", "intentos": int(fila.get("intentos") or 0) + 1,
@@ -1145,7 +1438,7 @@ def check_pendientes():
 
 @app.route("/")
 def index():
-    return "Bot activo v6", 200
+    return "Bot activo v7", 200
 
 iniciar_vigilante()
 
