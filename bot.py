@@ -86,8 +86,13 @@ ROBLOX_PRODUCTOS = [
 for _p in ROBLOX_PRODUCTOS:
     _p.update(tipo="roblox", product_id=ROBLOX_PRODUCT_ID)
 
-TCG_OP_FF = "Free Fire 💎"
-TCG_OP_ROBLOX = "Roblox USD 🎁"
+# Boton para volver al menu desde cualquier paso
+MENU_BTN = "⬅️ Menu"
+MENU_TEXTOS = ("menu", "/menu", "/start", "⬅️ menu", "⬅ menu", "volver", "volver al menu")
+
+def es_menu(texto):
+    t = (texto or "").strip().lower()
+    return t in MENU_TEXTOS or t.replace("⬅️", "").replace("⬅", "").strip() == "menu"
 
 def precio_reventa(costo, markup):
     valor = Decimal(str(costo)) * (Decimal("1") + Decimal(str(markup)))
@@ -463,7 +468,11 @@ def enviar(chat_id, texto, teclado=None):
         datos["reply_markup"] = teclado
     requests.post(f"{URL_TELEGRAM}/sendMessage", json=datos)
 
-def botones(opciones):
+def teclado_menu():
+    """Teclado solo con el boton de menu (para pasos donde se escribe: ID, monto, nombre...)."""
+    return {"keyboard": [[{"text": MENU_BTN}]], "resize_keyboard": True, "one_time_keyboard": True}
+
+def botones(opciones, menu=True):
     filas = []
     fila = []
     for op in opciones:
@@ -473,14 +482,45 @@ def botones(opciones):
             fila = []
     if fila:
         filas.append(fila)
+    if menu:
+        filas.append([{"text": MENU_BTN}])
     return {"keyboard": filas, "resize_keyboard": True, "one_time_keyboard": True}
 
-def menu_principal(chat_id, usuario, saldo):
-    if usuario == "Admin":
-        enviar(chat_id, f"Bienvenido Admin\n\n/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n/asignar - Asignar saldo a local\n/nuevo - Crear usuario\n\nTCG (opcion 2):\n/tcg - Recarga por TCG (Free Fire / Roblox)\n/tcgsaldo - Saldo TCG\n/tcgestado <pedido> - Estado de pedido TCG")
+QUITAR_TECLADO = {"remove_keyboard": True}
+
+def menu_principal(chat_id, usuario, saldo, es_admin=False):
+    if usuario == "Admin" or es_admin:
+        enviar(chat_id,
+            f"Bienvenido {usuario}\n\n"
+            f"/recargar - Nueva recarga\n/saldo - Saldo tienda\n/reporte - Reportes\n/usuarios - Saldo por local\n"
+            f"/asignar - Asignar saldo a local\n/nuevo - Crear usuario\n\n"
+            f"TCG (opcion 2):\n/tcg - Recarga TCG Free Fire\n/tcgroblox - Tarjeta Roblox USD TCG\n"
+            f"/tcgsaldo - Saldo TCG\n/tcgestado <pedido> - Estado de pedido TCG\n\n"
+            f"/menu - Volver a este menu\n/salir - Cerrar sesion", QUITAR_TECLADO)
     else:
-        extra = "\n/tcg - Recarga por TCG" if not LIO_SOLO_ADMIN else ""
-        enviar(chat_id, f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n/reporte - Mis recargas de hoy{extra}")
+        extra = ("\n/tcg - Recarga TCG Free Fire\n/tcgroblox - Tarjeta Roblox USD TCG\n/tcgestado <pedido> - Estado de pedido TCG"
+                 if not LIO_SOLO_ADMIN else "")
+        enviar(chat_id,
+            f"Bienvenido {usuario}\nTu saldo: ${saldo}\n\n/recargar - Nueva recarga\n/saldo - Ver mi saldo\n"
+            f"/reporte - Mis recargas de hoy{extra}\n\n/menu - Volver a este menu\n/salir - Cerrar sesion", QUITAR_TECLADO)
+
+def volver_menu(chat_id, sesion):
+    """Boton Menu / /menu / /start: deja la sesion en el menu (sin cerrar sesion) y muestra el menu segun el rol.
+    Si hay un pedido en curso ('procesando') no se toca: el pedido sigue y avisa al terminar."""
+    usuario, es_admin = sesion.get("usuario", ""), sesion.get("es_admin", False)
+    if sesion.get("paso") == "procesando":
+        enviar(chat_id, "Tu pedido sigue en proceso, te aviso por aqui cuando termine.")
+    else:
+        sesiones[chat_id] = {"paso": "menu", "usuario": usuario, "es_admin": es_admin}
+    saldo = "-"
+    try:
+        u = sb_get_usuario(usuario)
+        if u and u.get("saldo") is not None:
+            saldo = u["saldo"]
+    except Exception:
+        pass
+    menu_principal(chat_id, usuario, saldo, es_admin)
+    return {"status": "ok"}
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -493,7 +533,15 @@ def webhook():
     message_id = datos["message"].get("message_id")
     sesion = sesiones.get(chat_id, {})
 
-    if texto == "/start":
+    if texto == "/salir":
+        sesiones[chat_id] = {"paso": "login_nombre"}
+        enviar(chat_id, "Sesion cerrada.\nEscribe tu nombre de usuario:", QUITAR_TECLADO)
+        return {"status": "ok"}
+
+    if sesion.get("usuario") and es_menu(texto):
+        return volver_menu(chat_id, sesion)
+
+    if texto == "/start" or (es_menu(texto) and sesion.get("paso") in ("login_nombre", "login_password")):
         sesiones[chat_id] = {"paso": "login_nombre"}
         enviar(chat_id, "Escribe tu nombre de usuario:")
         return {"status": "ok"}
@@ -522,7 +570,7 @@ def webhook():
                 "usuario": u["nombre"],
                 "es_admin": u["es_admin"]
             }
-            menu_principal(chat_id, u["nombre"], u["saldo"])
+            menu_principal(chat_id, u["nombre"], u["saldo"], u.get("es_admin"))
         else:
             enviar(chat_id, "Usuario o contrasena incorrectos. Escribe /start para intentar de nuevo.")
             sesiones.pop(chat_id, None)
@@ -625,14 +673,14 @@ def webhook():
             enviar(chat_id, "Solo el admin puede crear usuarios.")
             return {"status": "ok"}
         sesiones[chat_id]["paso"] = "nuevo_nombre"
-        enviar(chat_id, "Escribe el nombre del nuevo usuario:")
+        enviar(chat_id, "Escribe el nombre del nuevo usuario:", teclado_menu())
         return {"status": "ok"}
 
     if paso == "nuevo_nombre":
         nombre_nuevo = texto
         u = sb_get_usuario(nombre_nuevo)
         if u:
-            enviar(chat_id, f"Ya existe un usuario con ese nombre. Escribe otro:")
+            enviar(chat_id, f"Ya existe un usuario con ese nombre. Escribe otro:", teclado_menu())
             return {"status": "ok"}
         import random, string
         letras = random.choices(string.ascii_uppercase, k=2)
@@ -645,6 +693,7 @@ def webhook():
             f"Usuario: {nombre_nuevo}\n"
             f"Contrasena sugerida: {pwd_sugerida}\n\n"
             f"Escribe una contrasena o envía 'ok' para usar la sugerida:",
+            botones(["ok"])
         )
         return {"status": "ok"}
 
@@ -653,19 +702,19 @@ def webhook():
         if texto_limpio == "ok":
             pwd_final = sesiones[chat_id]["pwd_sugerida"]
         elif len(texto) < 4:
-            enviar(chat_id, "La contrasena debe tener al menos 4 caracteres. Intenta de nuevo o escribe 'ok' para usar la sugerida:")
+            enviar(chat_id, "La contrasena debe tener al menos 4 caracteres. Intenta de nuevo o escribe 'ok' para usar la sugerida:", teclado_menu())
             return {"status": "ok"}
         else:
             import re
             if not re.match(r'^[a-zA-Z0-9]+$', texto):
-                enviar(chat_id, "Solo letras y numeros permitidos. Intenta de nuevo o escribe 'ok' para usar la sugerida:")
+                enviar(chat_id, "Solo letras y numeros permitidos. Intenta de nuevo o escribe 'ok' para usar la sugerida:", teclado_menu())
                 return {"status": "ok"}
             pwd_final = texto
         
         nombre_nuevo = sesiones[chat_id]["nuevo_nombre"]
         sesiones[chat_id]["paso"] = "nuevo_saldo"
         sesiones[chat_id]["nuevo_password"] = pwd_final
-        enviar(chat_id, f"Cuanto saldo inicial para {nombre_nuevo}? (escribe 0 si ninguno)")
+        enviar(chat_id, f"Cuanto saldo inicial para {nombre_nuevo}? (escribe 0 si ninguno)", teclado_menu())
         return {"status": "ok"}
 
     if paso == "nuevo_saldo":
@@ -684,7 +733,7 @@ def webhook():
                 f"Saldo inicial: ${saldo_inicial}"
             )
         except:
-            enviar(chat_id, "Escribe un numero valido.")
+            enviar(chat_id, "Escribe un numero valido.", teclado_menu())
         return {"status": "ok"}
     
     if texto == "/asignar":
@@ -705,9 +754,9 @@ def webhook():
         if u and not u["es_admin"]:
             sesiones[chat_id]["asignar_a"] = texto
             sesiones[chat_id]["paso"] = "asignar_monto"
-            enviar(chat_id, f"Cuanto saldo asignar a {texto}?")
+            enviar(chat_id, f"Cuanto saldo asignar a {texto}?", teclado_menu())
         else:
-            enviar(chat_id, "Local no valido.")
+            enviar(chat_id, "Local no valido.", teclado_menu())
         return {"status": "ok"}
 
     if paso == "asignar_monto":
@@ -718,7 +767,7 @@ def webhook():
             sesiones[chat_id]["paso"] = "menu"
             enviar(chat_id, f"Se asignaron ${monto} a {local}.")
         except:
-            enviar(chat_id, "Escribe un numero valido.")
+            enviar(chat_id, "Escribe un numero valido.", teclado_menu())
         return {"status": "ok"}
 
     if texto == "/recargar":
@@ -746,7 +795,7 @@ def webhook():
                 return {"status": "ok"}
         sesiones[chat_id]["producto"] = producto
         sesiones[chat_id]["paso"] = "pedir_id"
-        enviar(chat_id, f"{producto['nombre']} ${producto['precio']}\n\nEscribe el ID del jugador en Free Fire:")
+        enviar(chat_id, f"{producto['nombre']} ${producto['precio']}\n\nEscribe el ID del jugador en Free Fire:", teclado_menu())
         return {"status": "ok"}
 
     if paso == "pedir_id":
@@ -819,6 +868,7 @@ def lio_cobra_saldo(usuario, es_admin):
 
 
 TCG_CMD = ("/tcg", "/lio")
+TCG_ROBLOX = ("/tcgroblox", "/roblox", "/lioroblox")
 TCG_SALDO = ("/tcgsaldo", "/liosaldo")
 TCG_ESTADO = ("/tcgestado", "/lioestado")
 refs_cortos = {}  # ref corta (8) -> client_ref completo, para /tcgestado
@@ -831,24 +881,17 @@ def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
 
     modo = " (SANDBOX)" if LIO_SANDBOX else ""
     if texto in TCG_CMD and lio_activo:
-        sesiones[chat_id]["paso"] = "tcg_tipo"
-        enviar(chat_id, f"TCG{modo}\nQue deseas comprar?", botones([TCG_OP_FF, TCG_OP_ROBLOX]))
+        productos = lio_productos_con_precio()
+        sesiones[chat_id]["lio_productos"] = productos
+        sesiones[chat_id]["paso"] = "lio_elegir"
+        enviar(chat_id, f"TCG{modo}\nElige el monto:", botones([lio_etiqueta(p) for p in productos]))
         return {"status": "ok"}
 
-    if paso == "tcg_tipo" and lio_activo:
-        t = texto.lower()
-        if t.startswith("free fire") or t == "ff":
-            productos = lio_productos_con_precio()
-            sesiones[chat_id]["lio_productos"] = productos
-            sesiones[chat_id]["paso"] = "lio_elegir"
-            enviar(chat_id, f"TCG{modo}\nElige el monto:", botones([lio_etiqueta(p) for p in productos]))
-        elif t.startswith("roblox"):
-            productos = roblox_productos_con_precio()
-            sesiones[chat_id]["rbx_productos"] = productos
-            sesiones[chat_id]["paso"] = "rbx_elegir"
-            enviar(chat_id, f"TCG{modo} - Roblox (US) tarjeta de regalo en USD\nElige la tarjeta:", botones([lio_etiqueta(p) for p in productos]))
-        else:
-            enviar(chat_id, "Elige una opcion valida.", botones([TCG_OP_FF, TCG_OP_ROBLOX]))
+    if texto in TCG_ROBLOX and lio_activo:
+        productos = roblox_productos_con_precio()
+        sesiones[chat_id]["rbx_productos"] = productos
+        sesiones[chat_id]["paso"] = "rbx_elegir"
+        enviar(chat_id, f"TCG{modo} - Roblox (US) tarjeta de regalo en USD\nElige la tarjeta:", botones([lio_etiqueta(p) for p in productos]))
         return {"status": "ok"}
 
     if paso == "rbx_elegir" and lio_activo:
@@ -893,7 +936,7 @@ def webhook_lio(chat_id, texto, sesion, paso, usuario, es_admin, message_id):
                 return {"status": "ok"}
         sesiones[chat_id]["lio_producto"] = producto
         sesiones[chat_id]["paso"] = "lio_pedir_id"
-        enviar(chat_id, f"{TCG_PREFIJO}{lio_etiqueta(producto)}\n\nEscribe el ID del jugador en Free Fire:")
+        enviar(chat_id, f"{TCG_PREFIJO}{lio_etiqueta(producto)}\n\nEscribe el ID del jugador en Free Fire:", teclado_menu())
         return {"status": "ok"}
 
     if paso == "lio_pedir_id" and lio_activo:
@@ -1133,7 +1176,7 @@ def comandos_lio(chat_id, texto, sesion, usuario, es_admin, lio_activo):
     if partes and partes[0] in TCG_ESTADO and lio_activo:
         if len(partes) < 2:
             sesiones[chat_id]["paso"] = "tcg_estado_pedir"
-            enviar(chat_id, "Escribe el numero de pedido TCG:")
+            enviar(chat_id, "Escribe el numero de pedido TCG:", teclado_menu())
             return {"status": "ok"}
         return tcg_estado(chat_id, partes[1])
 
@@ -1438,7 +1481,7 @@ def check_pendientes():
 
 @app.route("/")
 def index():
-    return "Bot activo v7", 200
+    return "Bot activo v8", 200
 
 iniciar_vigilante()
 
